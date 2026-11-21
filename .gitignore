@@ -1,0 +1,7 @@
+/build/
+/.deps/
+/out/
+/test-results/
+*.platz-journal
+*.platz-wal
+*.platz-shm
