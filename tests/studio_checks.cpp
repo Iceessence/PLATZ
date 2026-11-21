@@ -71,8 +71,7 @@ void expose(StudioWindow& window) {
     check(QTest::qWaitForWindowExposed(&window), "Studio did not expose a native window");
 }
 
-void fileAction(StudioWindow& window, Qt::Key shortcut, const QString& path) {
-    // The shortcut opens a modal event loop. Resolve through the real file-name edit.
+void chooseFile(const QString& path, const std::function<void()>& action) {
     bool answered = false;
     QTimer observer;
     QObject::connect(&observer, &QTimer::timeout, [&] {
@@ -87,12 +86,73 @@ void fileAction(StudioWindow& window, Qt::Key shortcut, const QString& path) {
         if (dialog->isVisible()) dialog->reject();
     });
     observer.start(25);
-    auto* entry=control<QPushButton>(window,shortcut==Qt::Key_N ? "newProject" : "openProject");
-    QTest::mouseClick(entry,Qt::LeftButton);
+    action();
     QApplication::processEvents();
     check(answered, "Studio project button did not open its file chooser");
 }
+void fileAction(StudioWindow& window, Qt::Key shortcut, const QString& path) {
+    chooseFile(path,[&]{
+        QTest::mouseClick(control<QPushButton>(window,shortcut==Qt::Key_N ? "newProject" : "openProject"),Qt::LeftButton);
+    });
+}
 
+void exerciseImport(QTemporaryDir& dir) {
+    const auto project=dir.filePath("Mesh scene.platz");
+    const auto source=dir.filePath("Spire.glb");
+    check(QFile::copy(PLATZ_TEST_MESH,source),"Could not prepare local import source");
+    Capture expected;
+    std::string id;
+    {
+        StudioWindow window;
+        expose(window);
+        fileAction(window,Qt::Key_N,project);
+        chooseFile(source,[&]{control<QAction>(window,"importGlb")->trigger();});
+        auto* tree=control<QListWidget>(window,"sceneTree");
+        check(tree->count()==5 && tree->currentRow()==4,"GLB import did not select a new scene object");
+        id=tree->currentItem()->data(Qt::UserRole).toString().toStdString();
+        enterText(control<QDoubleSpinBox>(window,"positionY"),"3.5");
+        auto* vp=static_cast<Viewport*>(control<QWidget>(window,"viewport"));
+        vp->setFocus(); QTest::keyClick(vp,Qt::Key_F);
+        expected=settledFrame(*vp);
+        auto point=visiblePoint(expected,5,*vp);
+        QTest::mouseClick(vp,Qt::LeftButton,{},point);
+        check(control<QLineEdit>(window,"objectName")->text()=="Spire","GPU pick missed the imported mesh");
+        auto* play=control<QPushButton>(window,"playButton");
+        QTest::mouseClick(play,Qt::LeftButton); QTest::mouseClick(vp,Qt::LeftButton,{},point);
+        check(settledFrame(*vp).tokens!=expected.tokens,"Imported mesh did not turn during Play");
+        QTest::mouseClick(play,Qt::LeftButton);
+        check(settledFrame(*vp).rgba==expected.rgba,"Stop failed to restore imported geometry");
+        QTest::mouseClick(control<QPushButton>(window,"saveButton"),Qt::LeftButton);
+        check(window.close(),"Imported project did not close");
+    }
+    check(QFile::remove(source),"Could not remove disposable source GLB");
+    {
+        StudioWindow window; expose(window); fileAction(window,Qt::Key_O,project);
+        auto* tree=control<QListWidget>(window,"sceneTree");
+        check(tree->count()==5 && tree->item(4)->data(Qt::UserRole).toString().toStdString()==id,"Imported identity lost on reopen");
+        tree->setCurrentRow(4);
+        auto* vp=static_cast<Viewport*>(control<QWidget>(window,"viewport"));
+        vp->setFocus(); QTest::keyClick(vp,Qt::Key_F);
+        auto actual=settledFrame(*vp);
+        check(actual.tokens==expected.tokens && actual.rgba==expected.rgba,"Embedded mesh render changed without source GLB");
+        const auto recovered=dir.filePath("Recovered.glb");
+        auto* exportButton=control<QPushButton>(window,"saveEmbeddedGlb");
+        check(exportButton->isVisible(),"Original GLB button is unavailable");
+        chooseFile(recovered,[&]{QTest::mouseClick(exportButton,Qt::LeftButton);});
+        QFile original(PLATZ_TEST_MESH), extracted(recovered);
+        check(original.open(QIODevice::ReadOnly) && extracted.open(QIODevice::ReadOnly) &&
+              original.readAll()==extracted.readAll(),"Extracted bytes differ from the original GLB");
+        extracted.close();
+        const auto occupied=dir.filePath("Already here.glb");
+        QFile marker(occupied);
+        check(marker.open(QIODevice::WriteOnly) && marker.write("keep")==4,"Could not prepare an occupied export path");
+        marker.close();
+        chooseFile(occupied,[&]{QTest::mouseClick(exportButton,Qt::LeftButton);});
+        check(marker.open(QIODevice::ReadOnly) && marker.readAll()=="keep","Export replaced an existing file");
+        check(window.close(),"Saving source bytes made an unrelated project edit");
+    }
+    std::cout<<"GLB import, Vulkan pick, isolated Play, pixel-identical reopen and byte-exact no-clobber extraction passed\n";
+}
 void exercise(const QString& path, bool create) {
     const std::filesystem::path file(path.toStdWString());
     std::string projectId, sceneId, editedId;
@@ -143,7 +203,7 @@ void exercise(const QString& path, bool create) {
         QTest::keyClick(tree,Qt::Key_Z,Qt::ControlModifier);
         // Add through Studio's creation menu. The file stays at its opened revision.
         auto* add = control<QPushButton>(window, "addObject");
-        check(add->menu() && add->menu()->actions().size()==3, "Creation menu is unavailable");
+        check(add->menu() && add->menu()->findChild<QAction*>("importGlb"), "Creation menu is unavailable");
         add->menu()->actions().front()->trigger();
         check(tree->count()==int(before.objects().size()+1), "Add object failed");
         const auto addedId=tree->currentItem()->data(Qt::UserRole).toString();
@@ -261,5 +321,6 @@ int main(int argc, char** argv) {
         const QString copy = temp.filePath("Validation copy.platz");
         check(QFile::copy(QString::fromUtf8(PLATZ_VALIDATION_PATH), copy), "Cannot copy permanent validation project");
         exercise(copy, false);
+        exerciseImport(temp);
     } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }

@@ -38,10 +38,12 @@ private:
     std::array<QDoubleSpinBox*,9> axis_{};
     QLabel *projectTitle_{}, *mode_{}, *count_{}, *mesh_{}, *identity_{}, *backend_{}, *notice_{}, *recent_{}, *controls_{};
     QPushButton *play_{}, *save_{}, *add_{}, *swatch_{}, *recentOpen_{};
+    QPushButton* saveGlb_{};
     QAction *undo_{}, *redo_{}, *saveAction_{}, *restore_{}, *playAction_{}, *homeAction_{};
     QAction *duplicate_{}, *erase_{};
     QAction* repeat_{};
     void repeatObjects();
+    void saveEmbeddedGlb();
     QByteArray initialLayout_;
     bool refreshing_{};
     void buildHub();

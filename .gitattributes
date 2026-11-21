@@ -1,2 +1,4 @@
 docs/authority/*.md -text
 *.platz binary
+*.glb binary
+third_party/cgltf/* -text whitespace=-blank-at-eol

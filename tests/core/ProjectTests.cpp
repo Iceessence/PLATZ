@@ -224,11 +224,48 @@ void suite(const fs::path& executable) {
     layout.undo(); expect(!layout.dirty(),"Repeat undo failed.");
     layout.redo(); layout.save(); expect(Project::open(f.source).objects()==arranged,"Repeat reopen changed source identities.");
     pass("linear repeat, all-or-nothing validation, spacing, runtime, undo and durable identities");
+    Fixture meshFiles;
+    auto meshes=Project::create(meshFiles.source,"Import checks");
+    const auto originalId=meshes.importMesh(PLATZ_TEST_MESH,meshes.revision());
+    const auto asset=meshes.find(originalId)->asset.data;
+    expect(asset && asset->vertices().size()==18 && asset->indices().size()==18,"GLB geometry mismatch.");
+    auto invalidSource=asset->source();
+    invalidSource.back()=255;
+    rejects([&]{MeshAsset::decode(invalidSource);});
+    invalidSource.resize(20);
+    rejects([&]{MeshAsset::decode(invalidSource);});
+    auto copyId=meshes.duplicate(originalId,meshes.revision());
+    meshes.undo(); expect(!meshes.find(copyId),"Mesh duplicate undo failed."); meshes.redo();
+    meshes.save();
+    auto restored=Project::open(meshFiles.source);
+    expect(restored.objects()==meshes.objects() && restored.find(originalId)->asset.data==restored.find(copyId)->asset.data,
+           "Restored instances lost shared asset or identity.");
+    Runtime playImported(restored); expect(playImported.interact(copyId) && restored.objects()==meshes.objects(),"Mesh runtime isolation failed.");
+#ifdef _WIN32
+    expect(_wspawnl(_P_WAIT,executable.c_str(),executable.c_str(),L"--interrupt-assets",meshFiles.source.c_str(),nullptr)==73,
+           "Mesh transaction crash test failed to run.");
+    expect(Project::open(meshFiles.source).objects()==meshes.objects(),"Mesh data and project head did not recover atomically.");
+#endif
+    restored.remove(originalId,restored.revision());restored.remove(copyId,restored.revision());restored.save();
+    auto recovery=Project::open(meshFiles.source); recovery.restorePrevious();
+    expect(recovery.objects()==meshes.objects(),"Prior revision lost its embedded asset.");
+    alter(meshFiles.source,"UPDATE assets SET source=zeroblob(512)");
+    rejects([&]{auto corrupt=Project::open(meshFiles.source);corrupt.restorePrevious();});
+    pass("GLB bounds, immutable shared geometry, atomic mesh recovery and corrupt-blob rejection");
 }
 }
 
 int main(int argc, char** argv) {
     try {
+        if(argc==3 && std::string(argv[1])=="--interrupt-assets")
+            alter(argv[2],"BEGIN IMMEDIATE; DELETE FROM assets; UPDATE project SET head=777",true);
+        if(argc==3 && std::string(argv[1])=="--extend-validation-mesh") {
+            auto p=Project::open(argv[2]);
+            for(const auto& o:p.objects()) if(o.asset.data) throw std::runtime_error("Validation mesh already present.");
+            auto id=p.importMesh(PLATZ_TEST_MESH,p.revision());
+            auto obj=*p.find(id); obj.position={-2.35f,0,1.23f}; obj.color={0.84f,0.42f,0.32f};
+            p.edit(obj,p.revision()); p.save(); return 0;
+        }
         if (argc==3 && std::string(argv[1])=="--validation") { generateValidation(argv[2]); return 0; }
         if (argc==3 && std::string(argv[1])=="--interrupt") {
             alter(argv[2],"PRAGMA synchronous=FULL; BEGIN IMMEDIATE; UPDATE objects SET name='interrupted'; UPDATE project SET head=777",true);

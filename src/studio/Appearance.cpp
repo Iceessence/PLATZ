@@ -31,6 +31,9 @@ QIcon meshIcon(platz::Mesh mesh, platz::Vec3 color) {
         path.moveTo(9,13); path.cubicTo(9,4,39,4,39,13); path.lineTo(39,34);
         path.cubicTo(39,43,9,43,9,34); path.closeSubpath();
         p.drawPath(path); p.drawArc(9,6,30,14,180*16,180*16);
+    } else if (mesh == platz::Mesh::Imported) {
+        p.drawPolygon(QPolygonF{{24,6},{41,35},{24,42},{7,35}});
+        p.drawLine(24,6,24,42);
     } else {
         p.drawPolygon(QPolygonF{{24,6},{40,15},{40,33},{24,42},{8,33},{8,15}});
         p.drawPolyline(QPolygonF{{8,15},{24,24},{40,15}});

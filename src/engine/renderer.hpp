@@ -1,4 +1,5 @@
 #pragma once
+#include "../assets/MeshAsset.hpp"
 
 #include <array>
 #include <cstdint>
@@ -9,7 +10,7 @@
 
 namespace platz::engine {
 using Vec3 = std::array<float, 3>;
-enum class Mesh { Cube, Sphere, Cylinder };
+enum class Mesh { Cube, Sphere, Cylinder, Imported = 4 };
 
 struct DrawObject {
     std::uint32_t token{}; // Nonzero. Owned by the caller's scene-to-frame mapping.
@@ -18,6 +19,7 @@ struct DrawObject {
     Vec3 rotation{}; // Degrees, local X then Y then Z, right-handed.
     Vec3 scale{1, 1, 1};
     Vec3 color{0.65f, 0.65f, 0.65f}; // sRGB
+    std::shared_ptr<const platz::MeshAsset> asset{};
 };
 
 struct Camera {
@@ -28,6 +30,7 @@ struct Camera {
     void pan(float deltaX, float deltaY, float viewportHeight);
     void move(float right, float up, float forward); // World distances.
     void frame(Vec3 center, Vec3 dimensions);
+    void frameObject(const DrawObject& object, float aspect);
 };
 
 struct Capture {

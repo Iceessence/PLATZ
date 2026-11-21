@@ -37,9 +37,10 @@ void profile(const std::filesystem::path& file) {
         case platz::Mesh::Cube: mesh = Mesh::Cube; break;
         case platz::Mesh::Sphere: mesh = Mesh::Sphere; break;
         case platz::Mesh::Cylinder: mesh = Mesh::Cylinder; break;
+        case platz::Mesh::Imported: mesh = Mesh::Imported; break;
         }
         scene.push_back({static_cast<unsigned>(scene.size()) + 1, mesh, vector(object.position),
-            vector(object.rotation), vector(object.scale), vector(object.color)});
+            vector(object.rotation), vector(object.scale), vector(object.color),object.asset.data});
     }
     TestSurface surface;
     check(surface.handle && SetWindowPos(surface.handle,nullptr,0,0,1280,720,SWP_NOZORDER|SWP_NOACTIVATE),
@@ -146,6 +147,16 @@ void run() {
               << ", shell coverage " << coverage(restored,shell.token) << " pixels\n";
     check(restored.width == 376 && restored.height == 250 && coverage(restored, shell.token) > 500,
           "Restored viewport lost its scene or attachments");
+    DrawObject mesh{421,Mesh::Imported,{0,0,0}};
+    mesh.asset=platz::MeshAsset::load(PLATZ_TEST_MESH);
+    Camera meshCamera;
+    meshCamera.frameObject(mesh,376.f/250.f);
+    gpu.draw(std::span(&mesh,1),meshCamera);
+    check(coverage(gpu.capture(),mesh.token)>300,"Imported mesh was not uploaded");
+    gpu.draw(scene,camera);
+    check(gpu.capture().tokens==restored.tokens,"Retiring the imported atlas changed built-in geometry");
+    gpu.draw(std::span(&mesh,1),meshCamera);
+    check(coverage(gpu.capture(),mesh.token)>300,"Re-uploading an imported atlas failed");
     check(gpu.validationErrors() == 0, "Vulkan reported graphics validation errors");
     std::cout << "Adapter: " << gpu.adapter() << "\n" << gpu.diagnostics() << "\n"
               << width << "x" << height << ", 3 objects, 11 draw + synchronous readbacks; median "

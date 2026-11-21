@@ -256,18 +256,24 @@ void StudioWindow::syncInspector() {
         if(it!=objects.end()) object=&*it;
     }
     const bool editable=object && !runtime_;
+    const bool embedded=object && object->asset.data;
+    saveGlb_->setVisible(embedded && !runtime_);
     inspector_->setEnabled(editable);
     duplicate_->setEnabled(editable);
     repeat_->setEnabled(editable);
     erase_->setEnabled(editable);
     if (!object) {
         name_->clear(); mesh_->setText(tr("Select an object")); identity_->clear(); color_->clear();
+        mesh_->setToolTip({});
         for(auto* field:axis_) field->setValue(0);
         swatch_->setStyleSheet({});
         return;
     }
     name_->setText(QString::fromStdString(object->name));
     mesh_->setText(tr("%1 mesh").arg(QString::fromUtf8(platz::meshName(object->mesh))));
+    if(object->asset.data) mesh_->setText(tr("GLB  ·  %1 vertices  ·  %2 triangles")
+        .arg(object->asset.data->vertices().size()).arg(object->asset.data->indices().size()/3));
+    mesh_->setToolTip(object->asset.data ? QString::fromStdString("SHA-256 "+object->asset.data->digest()) : QString{});
     identity_->setText(QString::fromStdString(object->id));
     const std::array vectors{object->position,object->rotation,object->scale};
     for (std::size_t g=0;g<vectors.size();++g) {

@@ -8,6 +8,7 @@ namespace {
 platz::engine::Vec3 toEngine(platz::Vec3 v) { return {v.x,v.y,v.z}; }
 platz::engine::Mesh toEngine(platz::Mesh mesh) {
     switch (mesh) {
+    case platz::Mesh::Imported: return platz::engine::Mesh::Imported;
     case platz::Mesh::Sphere: return platz::engine::Mesh::Sphere;
     case platz::Mesh::Cylinder: return platz::engine::Mesh::Cylinder;
     default: return platz::engine::Mesh::Cube;
@@ -34,7 +35,7 @@ void Viewport::setScene(const std::vector<platz::Object>& objects, const std::st
         ids_.push_back(object.id);
         const auto token = static_cast<std::uint32_t>(ids_.size());
         draws_.push_back({token, toEngine(object.mesh), toEngine(object.position), toEngine(object.rotation),
-                          toEngine(object.scale), toEngine(object.color)});
+                          toEngine(object.scale), toEngine(object.color),object.asset.data});
         if (selection == object.id) selection_ = token;
     }
     update();
@@ -44,7 +45,7 @@ void Viewport::resetView() { camera_ = {}; update(); }
 void Viewport::frameSelection() {
     if (selection_ && selection_ <= draws_.size()) {
         const auto& object = draws_[selection_-1];
-        camera_.frame(object.position, object.scale);
+        camera_.frameObject(object,float(width())/std::max(1,height()));
         update();
     }
 }

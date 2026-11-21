@@ -9,6 +9,7 @@
 #include <cstring>
 #include <iomanip>
 #include <limits>
+#include <map>
 #include <sstream>
 #include <stdexcept>
 
@@ -29,6 +30,7 @@ XMVECTOR offset(const Camera& camera) {
 struct Vertex {
     XMFLOAT3 position, normal;
 };
+
 struct MeshRange {
     UINT startIndex, count;
 };
@@ -124,7 +126,7 @@ void Camera::orbit(float dx, float dy) {
     pitch = std::clamp(pitch + dy * .006f, -1.50f, 1.50f);
 }
 void Camera::zoom(float steps) {
-    distance = std::clamp(distance * std::exp(-steps * .14f), .22f, 650.f);
+    distance = std::clamp(distance * std::exp(-steps * .14f), .002f, 2.e10f);
 }
 void Camera::move(float right, float up, float forward) {
     target[0] += std::cos(yaw) * right - std::sin(yaw) * forward;
@@ -138,6 +140,20 @@ void Camera::pan(float dx, float dy, float height) {
 void Camera::frame(Vec3 center, Vec3 dimensions) {
     target = center;
     distance = std::clamp(XMVectorGetX(XMVector3Length(vector(dimensions))) * 1.45f, .5f, 650.f);
+}
+void Camera::frameObject(const DrawObject& object,float aspect) {
+    if (!object.asset) { frame(object.position,object.scale); return; }
+    const auto lo=vector(object.asset->minCorner()), hi=vector(object.asset->maxCorner());
+    auto rotation=XMMatrixRotationX(XMConvertToRadians(object.rotation[0])) *
+                  XMMatrixRotationY(XMConvertToRadians(object.rotation[1])) *
+                  XMMatrixRotationZ(XMConvertToRadians(object.rotation[2]));
+    auto localCenter=(lo+hi)*0.5f*vector(object.scale);
+    XMFLOAT3 center;
+    XMStoreFloat3(&center,XMVector3TransformNormal(localCenter,rotation)+vector(object.position));
+    target={center.x,center.y,center.z};
+    float radius=XMVectorGetX(XMVector3Length((hi-lo)*0.5f*vector(object.scale)));
+    float halfAngle=std::atan(std::tan(fov/2)*std::clamp(aspect,0.02f,1.f));
+    distance=std::clamp(1.15f*radius/std::sin(halfAngle),0.002f,2.e10f);
 }
 
 namespace {
@@ -210,8 +226,10 @@ struct Renderer::Impl {
     VkCommandBuffer transferCmd{};
     VkFence transferFence{};
     Buffer geometry, readback;
+    Buffer pendingGeometry, geometryStaging;
     VkDeviceSize indexOffset{}, stride{};
     std::array<MeshRange, 4> ranges{};
+    std::map<std::string,MeshRange> imported;
     VkSwapchainKHR chain{};
     std::vector<PresentImage> images;
     VkExtent2D extent{}, requested{};
@@ -223,7 +241,7 @@ struct Renderer::Impl {
     void rebuild();
     void releaseSwap();
     void makePipelines();
-    void upload();
+    void upload(const std::map<std::string,const platz::MeshAsset*>& assets);
     void finishTransfer();
     void prepare(Frame&, std::span<const DrawObject>, const Camera&, uint32_t);
     void record(Frame&, std::span<const DrawObject>, uint32_t);
@@ -272,7 +290,7 @@ void Renderer::Impl::open(HWND hwnd) {
         }
     }
     makeCommands(d, transferPool, transferCmd, transferFence);
-    upload();
+    upload({});
     RECT rect{};
     GetClientRect(hwnd, &rect);
     requested = {static_cast<uint32_t>(std::max<LONG>(1, rect.right)),
@@ -320,36 +338,52 @@ void Renderer::Impl::finishTransfer() {
     check(vkQueueSubmit2(d.queue, 1, &submit, transferFence), "Submitting GPU transfer");
     check(vkWaitForFences(d.device, 1, &transferFence, VK_TRUE, timeout), "Waiting for GPU transfer");
 }
-void Renderer::Impl::upload() {
+void Renderer::Impl::upload(const std::map<std::string,const platz::MeshAsset*>& assets) {
     auto source = makeGeometry();
-    ranges = source.ranges;
-    indexOffset = source.vertices.size() * sizeof(Vertex);
-    VkDeviceSize bytes = indexOffset + source.indices.size() * sizeof(uint32_t);
-    geometry = d.buffer(bytes,
+    std::map<std::string,MeshRange> newRanges;
+    for(const auto& [digest,asset]:assets) {
+        const auto base=static_cast<uint32_t>(source.vertices.size());
+        newRanges.emplace(digest,MeshRange{static_cast<UINT>(source.indices.size()),static_cast<UINT>(asset->indices().size())});
+        for(const auto& v:asset->vertices()) source.vertex(
+            {v.position[0],v.position[1],v.position[2]}, {v.normal[0],v.normal[1],v.normal[2]});
+        for(auto index:asset->indices()) source.indices.push_back(base+index);
+    }
+    const VkDeviceSize vertexBytes = source.vertices.size() * sizeof(Vertex);
+    VkDeviceSize bytes = vertexBytes + source.indices.size() * sizeof(uint32_t);
+    auto replacement = d.buffer(bytes,
                         VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
                             VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
-                        MemoryIntent::Mesh, "Primitive mesh atlas");
+                        MemoryIntent::Mesh, "Scene mesh atlas");
     auto staging = d.buffer(bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, MemoryIntent::Upload, "Mesh upload");
-    std::memcpy(staging.mapped, source.vertices.data(), indexOffset);
-    std::memcpy(static_cast<std::byte*>(staging.mapped) + indexOffset, source.indices.data(),
-                bytes - indexOffset);
+    std::memcpy(staging.mapped, source.vertices.data(), vertexBytes);
+    std::memcpy(static_cast<std::byte*>(staging.mapped) + vertexBytes, source.indices.data(),
+                bytes - vertexBytes);
     check(vmaFlushAllocation(d.allocator, staging.allocation, 0, VK_WHOLE_SIZE), "Flushing mesh upload");
     startCommands(d.device, transferPool, transferCmd);
     VkBufferCopy copy{0, 0, bytes};
-    vkCmdCopyBuffer(transferCmd, staging.handle, geometry.handle, 1, &copy);
+    vkCmdCopyBuffer(transferCmd, staging.handle, replacement.handle, 1, &copy);
     VkBufferMemoryBarrier2 b{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2};
     b.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
     b.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
     b.dstStageMask = VK_PIPELINE_STAGE_2_INDEX_INPUT_BIT | VK_PIPELINE_STAGE_2_VERTEX_ATTRIBUTE_INPUT_BIT;
     b.dstAccessMask = VK_ACCESS_2_INDEX_READ_BIT | VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT;
     b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    b.buffer = geometry.handle;
+    b.buffer = replacement.handle;
     b.size = VK_WHOLE_SIZE;
     VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
     dep.bufferMemoryBarrierCount = 1;
     dep.pBufferMemoryBarriers = &b;
     vkCmdPipelineBarrier2(transferCmd, &dep);
+    // Keep both buffers alive if the submitted transfer times out.
+    pendingGeometry=std::move(replacement);
+    geometryStaging=std::move(staging);
     finishTransfer();
+    // The transfer fence also retires preceding draws on this graphics queue.
+    geometry=std::move(pendingGeometry);
+    geometryStaging={};
+    ranges=source.ranges;
+    indexOffset=vertexBytes;
+    imported=std::move(newRanges);
 }
 void Renderer::Impl::releaseSwap() {
     for (auto& image : images)
@@ -574,7 +608,8 @@ void Renderer::Impl::prepare(Frame& f, std::span<const DrawObject> objects, cons
     Constants c{};
     auto center = vector(camera.target), eye = center + offset(camera) * camera.distance;
     auto view = XMMatrixLookAtRH(eye, center, XMVectorSet(0, 1, 0, 0));
-    auto projection = XMMatrixPerspectiveFovRH(fov, float(extent.width) / float(extent.height), .04f, 2000.f);
+    auto projection = XMMatrixPerspectiveFovRH(fov, float(extent.width) / float(extent.height),
+        std::max(.00001f,camera.distance*.001f),std::max(2000.f,camera.distance*5.f));
     XMStoreFloat4x4(&c.viewProjection, view * projection);
     XMStoreFloat3(&c.eye, eye);
     c.selected = selected;
@@ -650,18 +685,20 @@ void Renderer::Impl::record(Frame& f, std::span<const DrawObject> objects, uint3
     VkDeviceSize zero{};
     vkCmdBindVertexBuffers(cmd, 0, 1, &geometry.handle, &zero);
     vkCmdBindIndexBuffer(cmd, geometry.handle, indexOffset, VK_INDEX_TYPE_UINT32);
-    auto submit = [&](size_t i, uint32_t mesh) {
+    auto submit = [&](size_t i, MeshRange range) {
         uint32_t off = static_cast<uint32_t>(stride * i);
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, shaders::sceneSet, 1,
                                 &f.constants, 1, &off);
-        vkCmdDrawIndexed(cmd, ranges[mesh].count, 1, ranges[mesh].startIndex, 0, 0);
+        vkCmdDrawIndexed(cmd, range.count, 1, range.startIndex, 0, 0);
     };
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ground);
-    submit(0, 3);
+    submit(0, ranges[3]);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
     for (size_t i = 0; i < objects.size(); ++i)
-        if (objects[i].token && static_cast<uint32_t>(objects[i].mesh) < 3)
-            submit(i + 1, static_cast<uint32_t>(objects[i].mesh));
+        if (objects[i].token && objects[i].asset)
+            submit(i+1,imported.at(objects[i].asset->digest()));
+        else if (objects[i].token && static_cast<uint32_t>(objects[i].mesh) < 3)
+            submit(i + 1, ranges[static_cast<uint32_t>(objects[i].mesh)]);
     vkCmdEndRendering(cmd);
     for (auto* image : {&f.color, &f.ids})
         imageBarrier(cmd, image->handle, image->aspect, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
@@ -690,6 +727,10 @@ void Renderer::Impl::draw(std::span<const DrawObject> objects, const Camera& cam
         rebuild();
     if (!chain)
         return;
+    std::map<std::string,const platz::MeshAsset*> assets;
+    for(const auto& object:objects) if(object.asset) assets.try_emplace(object.asset->digest(),object.asset.get());
+    if(assets.size()!=imported.size() || !std::equal(assets.begin(),assets.end(),imported.begin(),
+            [](const auto& a,const auto& b){return a.first==b.first;})) upload(assets);
     auto& f = frames[current];
     check(vkWaitForFences(d.device, 1, &f.fence, VK_TRUE, timeout), "Reusing completed frame");
     if (f.rendered && f.timing) {

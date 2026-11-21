@@ -10,6 +10,7 @@
 #include <QDockWidget>
 #include <QDoubleSpinBox>
 #include <QFileInfo>
+#include <QFileDialog>
 #include <QGridLayout>
 #include <QLabel>
 #include <QLineEdit>
@@ -20,6 +21,7 @@
 #include <QSettings>
 #include <QStackedWidget>
 #include <QStatusBar>
+#include <QTemporaryFile>
 #include <QToolBar>
 
 namespace {
@@ -166,6 +168,18 @@ void StudioWindow::buildStudio() {
             protectedCall([&]{selected_=project_->add(mesh); refresh();});
         });
     }
+    choices->addSeparator();
+    auto* import=choices->addAction(tr("Import mesh from GLB…"),this,[this]{
+        if (!project_ || runtime_) return;
+        auto path=QFileDialog::getOpenFileName(this,tr("Import mesh geometry"),{},tr("Binary glTF mesh (*.glb)"),nullptr,QFileDialog::DontUseNativeDialog);
+        if (!path.isEmpty()) protectedCall([&]{
+            selected_=project_->importMesh(path.toStdWString(),project_->revision());
+            refresh(); viewport_->frameSelection();
+            notify(tr("Imported local-space geometry only. Save to embed the original GLB."));
+        });
+    });
+    import->setObjectName("importGlb");
+    import->setToolTip(tr("One indexed triangle primitive, up to 2 MiB. Imports local positions and normals."));
     add_->setMenu(choices);
     left->addWidget(add_);
     sceneDock_->setMinimumWidth(152);
@@ -203,6 +217,11 @@ void StudioWindow::buildInspector() {
     box->addWidget(name_);
     mesh_=label({},"minor");
     box->addWidget(mesh_);
+    saveGlb_=button(tr("Save original GLB…"),"saveEmbeddedGlb");
+    saveGlb_->setToolTip(tr("Save the embedded source bytes. Scene transforms and PLATZ colors belong to the project."));
+    saveGlb_->hide();
+    box->addWidget(saveGlb_,0,Qt::AlignLeft);
+    connect(saveGlb_,&QPushButton::clicked,this,&StudioWindow::saveEmbeddedGlb);
     connect(name_,&QLineEdit::editingFinished,this,[this]{
         if (name_->isModified()) applyEdit([this](platz::Object& o){o.name=name_->text().toStdString();});
     });
@@ -287,6 +306,28 @@ void StudioWindow::buildInspector() {
         connect(editor,&QLineEdit::textEdited,this,[this]{
             if (project_ && !runtime_ && !refreshing_) save_->setEnabled(true);
         });
+}
+
+void StudioWindow::saveEmbeddedGlb() {
+    if (!project_ || runtime_) return;
+    const auto* selected=project_->find(selected_);
+    if (!selected || !selected->asset.data) return;
+    const auto source=selected->asset.data;
+    QFileDialog dialog(this,tr("Save original GLB"),{},tr("Binary glTF (*.glb)"));
+    dialog.setOptions(QFileDialog::DontConfirmOverwrite|QFileDialog::DontUseNativeDialog);
+    dialog.setAcceptMode(QFileDialog::AcceptSave);
+    dialog.setDefaultSuffix("glb");
+    if (dialog.exec()!=QDialog::Accepted) return;
+    const auto destination=dialog.selectedFiles().constFirst();
+    QTemporaryFile file(QFileInfo(destination).absoluteDir().filePath(".platz-glb-XXXXXX"));
+    const auto size=static_cast<qint64>(source->source().size());
+    if (!file.open() || file.write(reinterpret_cast<const char*>(source->source().data()),size)!=size ||
+        !file.flush() || !file.rename(destination)) {
+        notify(tr("Could not save the GLB. Choose a writable folder and a new filename."));
+        return;
+    }
+    file.setAutoRemove(false);
+    notify(tr("Saved the original GLB source."));
 }
 
 void StudioWindow::repeatObjects() {

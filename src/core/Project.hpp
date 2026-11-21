@@ -1,4 +1,5 @@
 #pragma once
+#include "../assets/MeshAsset.hpp"
 
 #include <cstdint>
 #include <filesystem>
@@ -11,13 +12,14 @@ struct Vec3 {
     float x{}, y{}, z{};
     bool operator==(const Vec3&) const = default;
 };
-enum class Mesh { Cube, Sphere, Cylinder };
+enum class Mesh { Cube, Sphere, Cylinder, Imported };
 const char* meshName(Mesh mesh);
 
 struct Object {
     std::string id, name;
     Mesh mesh = Mesh::Cube;
     Vec3 position{}, rotation{}, scale{1,1,1}, color{0.6f,0.7f,0.7f};
+    MeshReference asset{};
     bool operator==(const Object&) const = default;
 };
 
@@ -47,6 +49,7 @@ public:
     void apply(const ObjectEdit& proposal);
     void edit(const Object& replacement, std::uint64_t expectedRevision);
     std::string add(Mesh mesh);
+    std::string importMesh(const std::filesystem::path& source, std::uint64_t expectedRevision);
     std::string duplicate(const std::string& objectId, std::uint64_t expectedRevision);
     std::vector<Object> previewRepeat(const std::string& objectId, std::uint64_t expectedRevision,
                                       unsigned copies, Vec3 spacing) const;

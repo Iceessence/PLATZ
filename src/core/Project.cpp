@@ -16,6 +16,7 @@
 #include <cstdio>
 #include <stdexcept>
 #include <unordered_set>
+#include <unordered_map>
 
 namespace platz {
 namespace {
@@ -23,7 +24,9 @@ namespace fs = std::filesystem;
 constexpr int maxObjects = 512;
 constexpr int maxUndo = 128;
 constexpr std::uintmax_t maxFileBytes = 64 * 1024 * 1024;
+constexpr std::size_t maxMeshSourceBytes = 8u << 20;
 constexpr int applicationId = 0x504C545A;
+constexpr const char* assetsSql = "CREATE TABLE assets(key TEXT PRIMARY KEY,source BLOB NOT NULL)";
 constexpr const char* projectSql =
     "CREATE TABLE project(singleton INTEGER PRIMARY KEY CHECK(singleton=1),"
     "id TEXT NOT NULL,scene TEXT NOT NULL,name TEXT NOT NULL,head INTEGER NOT NULL,token TEXT NOT NULL)";
@@ -90,7 +93,12 @@ Mesh parseMesh(const std::string& key) {
 void validate(const Object& obj) {
     if (!validId(obj.id)) fail("Invalid scene object identity.");
     validateName(obj.name);
-    meshKey(obj.mesh);
+    if (obj.mesh==Mesh::Imported) {
+        if (!obj.asset.data) fail("Imported object is missing its source mesh.");
+    } else {
+        meshKey(obj.mesh);
+        if (obj.asset.data) fail("A primitive cannot have an imported mesh reference.");
+    }
     auto in = [](Vec3 v, float low, float high) {
         auto ok = [=](float f) { return std::isfinite(f) && f >= low && f <= high; };
         return ok(v.x) && ok(v.y) && ok(v.z);
@@ -177,15 +185,16 @@ struct Metadata { std::string id,scene,name,token; std::uint64_t head; int versi
 Metadata readMeta(Database& db) {
     if (scalar(db,"PRAGMA application_id") != applicationId) fail("This file is not a PLATZ project.");
     auto version = scalar(db,"PRAGMA user_version");
-    if (version != 1 && version != 2) fail("Unsupported PLATZ project version. Open it with a compatible build.");
+    if (version<1 || version>3) fail("Unsupported PLATZ project version. Open it with a compatible build.");
     Statement schema(db,"SELECT name,sql FROM sqlite_schema WHERE sql IS NOT NULL ORDER BY name");
     auto checkTable = [&](const char* name, const char* definition) {
         if (!schema.row() || schema.str(0) != name || schema.str(1) != definition)
             fail("Unrecognized project schema. The original file was preserved.");
     };
+    if (version>=3) checkTable("assets",assetsSql);
     checkTable("objects", objectsSql);
     checkTable("project", projectSql);
-    if (version == 2) checkTable("snapshots", snapshotsSql);
+    if (version >= 2) checkTable("snapshots", snapshotsSql);
     if (schema.row()) fail("Unrecognized project schema. The original file was preserved.");
     Statement q(db,"SELECT id,scene,name,token,head FROM project WHERE singleton=1");
     if (!q.row()) fail("Missing project identity.");
@@ -202,16 +211,37 @@ std::vector<Object> readObjects(Database& db, std::uint64_t rev, int version) {
     q.bind(1,static_cast<std::int64_t>(rev));
     std::vector<Object> result;
     std::unordered_set<std::string> ids;
+    std::unordered_map<std::string,MeshReference> assets;
+    std::size_t assetBytes=0;
     while (q.row()) {
         if (result.size() >= maxObjects) fail("This build supports up to 512 scene objects.");
-        Object o{q.str(0),q.str(1),parseMesh(q.str(2)),{q.number(3),q.number(4),q.number(5)},
+        const auto key=q.str(2);
+        const bool imported=version>=3 && key.starts_with("glb:");
+        Object o{q.str(0),q.str(1),imported ? Mesh::Imported : parseMesh(key),{q.number(3),q.number(4),q.number(5)},
                  {q.number(6),q.number(7),q.number(8)},{q.number(9),q.number(10),q.number(11)},
                  {q.number(12),q.number(13),q.number(14)}};
+        if (imported) {
+            auto& ref=assets[key];
+            if (!ref.data) {
+                Statement blob(db,"SELECT source FROM assets WHERE key=?");
+                blob.bind(1,key);
+                if(!blob.row() || sqlite3_column_type(blob.stmt,0)!=SQLITE_BLOB) fail("Missing embedded mesh.");
+                const auto n=sqlite3_column_bytes(blob.stmt,0);
+                if(n<=0 || n>MeshAsset::maxBytes) fail("Invalid embedded mesh size.");
+                assetBytes+=n;
+                if(assetBytes>maxMeshSourceBytes) fail("Embedded mesh budget exceeded.");
+                auto* bytes=static_cast<const std::uint8_t*>(sqlite3_column_blob(blob.stmt,0));
+                if (!bytes) fail("Could not read embedded mesh.");
+                ref.data=MeshAsset::decode({bytes,static_cast<size_t>(n)});
+                if(key!="glb:"+ref.data->digest()) fail("Embedded mesh digest mismatch.");
+            }
+            o.asset=ref;
+        }
         validate(o);
         if (!ids.insert(o.id).second) fail("Duplicate object identity in project.");
         result.push_back(std::move(o));
     }
-    if (version == 2) {
+    if (version >= 2) {
         Statement count(db, "SELECT object_count FROM snapshots WHERE rev=?");
         count.bind(1,static_cast<std::int64_t>(rev));
         if (!count.row() || count.integer(0) != static_cast<std::int64_t>(result.size()))
@@ -236,7 +266,8 @@ void putObjects(Database& db, const std::vector<Object>& objects, std::uint64_t 
     for (size_t i=0; i<objects.size(); ++i) {
         auto& o=objects[i];
         ins.bind(1,static_cast<std::int64_t>(rev)); ins.bind(2,static_cast<std::int64_t>(i));
-        ins.bind(3,o.id); ins.bind(4,o.name); ins.bind(5,meshKey(o.mesh));
+        ins.bind(3,o.id); ins.bind(4,o.name);
+        ins.bind(5,o.asset.data ? "glb:"+o.asset.data->digest() : std::string(meshKey(o.mesh)));
         int k=6;
         for (Vec3 v : {o.position,o.rotation,o.scale,o.color}) {
             ins.bind(k++,v.x); ins.bind(k++,v.y); ins.bind(k++,v.z);
@@ -279,6 +310,7 @@ Object makeObject(Mesh mesh, std::string name, Vec3 p, Vec3 s, Vec3 c) {
 
 const char* meshName(Mesh mesh) {
     switch (mesh) {
+    case Mesh::Imported: return "Imported GLB";
     case Mesh::Cube: return "Cube";
     case Mesh::Sphere: return "Sphere";
     case Mesh::Cylinder: return "Cylinder";
@@ -350,6 +382,11 @@ ObjectEdit Project::stage(const Object& replacement, std::uint64_t expectedRevis
 void Project::replace(std::vector<Object> next) {
     if (next == objects_) return;
     requireRevisionCapacity();
+    size_t bytes=0;
+    std::unordered_set<std::string> unique;
+    for (const auto& o:next)
+        if(o.asset.data && unique.insert(o.asset.data->digest()).second) bytes+=o.asset.data->source().size();
+    if(bytes>maxMeshSourceBytes) fail("A scene can reference up to 8 MiB of unique embedded meshes.");
     undo_.push_back(objects_);
     if (undo_.size() > maxUndo) undo_.erase(undo_.begin());
     objects_=std::move(next); redo_.clear(); ++revision_;
@@ -369,9 +406,22 @@ void Project::edit(const Object& replacement, std::uint64_t expectedRevision) {
     apply(stage(replacement,expectedRevision));
 }
 std::string Project::add(Mesh mesh) {
+    if(mesh==Mesh::Imported) fail("Choose a GLB file to add an imported mesh.");
     if (objects_.size() >= maxObjects) fail("This build supports up to 512 scene objects.");
     auto o=makeObject(mesh, std::string(meshName(mesh))+" "+std::to_string(objects_.size()+1),
                       {0,0.5f,0},{1,1,1},{0.47f,0.72f,0.68f});
+    auto next=objects_; next.push_back(o); replace(std::move(next)); return o.id;
+}
+std::string Project::importMesh(const std::filesystem::path& source,std::uint64_t expectedRevision) {
+    requireRevision(expectedRevision);
+    if(objects_.size()>=maxObjects) fail("This build supports up to 512 scene objects.");
+    auto asset=MeshAsset::load(source);
+    const auto name=source.stem().u8string();
+    auto o=makeObject(Mesh::Imported,{name.begin(),name.end()},{},{1,1,1},{0.74f,0.78f,0.80f});
+    for (const auto& item:objects_) if(item.asset.data && item.asset.data->digest()==asset->digest()) {
+        asset=item.asset.data; break;
+    }
+    o.asset.data=std::move(asset); validate(o);
     auto next=objects_; next.push_back(o); replace(std::move(next)); return o.id;
 }
 std::string Project::duplicate(const std::string& objectId, std::uint64_t expectedRevision) {
@@ -454,6 +504,18 @@ void Project::save() {
         db.exec("INSERT INTO snapshots SELECT rev,count(*) FROM objects GROUP BY rev");
         db.exec("PRAGMA user_version=2");
     }
+    bool embedded=std::any_of(objects_.begin(),objects_.end(),[](const auto& o){return bool(o.asset.data);});
+    if(embedded && meta.version<3) { db.exec(assetsSql); db.exec("PRAGMA user_version=3"); }
+    if(embedded) {
+        std::unordered_set<std::string> inserted;
+        for(const auto& o:objects_) if(o.asset.data && inserted.insert(o.asset.data->digest()).second) {
+            const auto& bytes=o.asset.data->source();
+            Statement blob(db,"INSERT INTO assets(key,source) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET source=excluded.source WHERE assets.source<>excluded.source");
+            blob.bind(1,"glb:"+o.asset.data->digest());
+            blob.check(sqlite3_bind_blob(blob.stmt,2,bytes.data(),static_cast<int>(bytes.size()),SQLITE_TRANSIENT));
+            blob.done();
+        }
+    }
     putObjects(db,objects_,revision_);
     Statement update(db,"UPDATE project SET head=?,token=? WHERE singleton=1 AND token=?");
     update.bind(1,static_cast<std::int64_t>(revision_)); update.bind(2,nextToken);
@@ -463,6 +525,9 @@ void Project::save() {
     prune.bind(1,static_cast<std::int64_t>(head_)); prune.done();
     Statement pruneSnapshots(db,"DELETE FROM snapshots WHERE rev < ?");
     pruneSnapshots.bind(1,static_cast<std::int64_t>(head_)); pruneSnapshots.done();
+    if(embedded || meta.version>=3) db.exec("DELETE FROM assets WHERE key NOT IN (SELECT mesh FROM objects)");
+    if(scalar(db,"PRAGMA page_count")*scalar(db,"PRAGMA page_size")>maxFileBytes)
+        fail("Project exceeds the supported file size.");
     db.exec("COMMIT");
     head_=revision_; diskToken_=std::move(nextToken); hasPrevious_=true; saved_=std::move(savedCopy);
 }
