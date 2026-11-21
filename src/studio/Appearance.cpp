@@ -68,11 +68,11 @@ QDockWidget::title { background: #20292f; padding: 9px 10px; border-bottom: 1px 
 QMainWindow::separator { background: #323d43; width: 2px; height: 2px; }
 QPushButton, QToolButton { background: #2a353b; color: #dfebe7; border: 1px solid #425056; border-radius: 5px; padding: 6px 11px; }
 QPushButton:hover, QToolButton:hover { background: #38464d; }
-QPushButton:focus, QToolButton:focus, QLineEdit:focus, QDoubleSpinBox:focus { border: 1px solid #7fe3bc; }
+QPushButton:focus, QToolButton:focus, QLineEdit:focus { border: 1px solid #7fe3bc; }
 QPushButton:disabled, QToolButton:disabled { color: #879094; background: #222b30; border-color: #303a40; }
 QPushButton[accent="true"] { color: #102c23; background: #86e8bd; border-color: #97f1cc; font-weight: 650; }
 QPushButton[accent="true"]:hover { background: #acf6d4; }
-QLineEdit, QDoubleSpinBox { background: #11181c; border: 1px solid #3a484e; padding: 5px; border-radius: 4px; }
+QLineEdit { background: #11181c; border: 1px solid #3a484e; padding: 5px; border-radius: 4px; }
 QDoubleSpinBox QLineEdit { background: transparent; color: #e2e9e8; border: 0; padding: 0; }
 QListWidget { background: #181f24; border: none; outline: 0; }
 QListWidget::item { padding: 7px 5px; border-radius: 4px; }

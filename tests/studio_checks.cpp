@@ -1,4 +1,5 @@
 #include "StudioWindow.hpp"
+#include "Appearance.hpp"
 #include "Viewport.hpp"
 #include <QApplication>
 #include <QAction>
@@ -109,6 +110,8 @@ void exercise(const QString& path, bool create) {
         auto* tree = control<QListWidget>(window, "sceneTree");
         auto* name = control<QLineEdit>(window, "objectName");
         auto* position = control<QDoubleSpinBox>(window, "positionX");
+        auto* number=position->findChild<QLineEdit*>();
+        check(number && number->visibleRegion().boundingRect().width()>=35,"Inspector numeric editor is clipped");
         auto* color = control<QLineEdit>(window, "materialColor");
         auto* play = control<QPushButton>(window, "playButton");
         check(viewport->isVisible() && tree->count() == int(before.objects().size()),
@@ -246,6 +249,7 @@ int main(int argc, char** argv) {
     try {
         QCoreApplication::setAttribute(Qt::AA_DontUseNativeDialogs);
         QApplication app(argc, argv);
+        configureAppearance(app);
         app.setQuitOnLastWindowClosed(false);
         app.setOrganizationName("PLATZ-Tests");
         app.setApplicationName("StudioVerification");
