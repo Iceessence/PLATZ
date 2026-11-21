@@ -31,6 +31,7 @@ StudioWindow::StudioWindow() {
     buildStudio();
     buildMenus();
     resizeDocks({sceneDock_, inspectorDock_},{220,292},Qt::Horizontal);
+    resizeDocks({assetsDock_},{270},Qt::Vertical);
     initialLayout_ = saveState(1);
     toHub();
 }
@@ -78,6 +79,7 @@ void StudioWindow::buildMenus() {
     auto* view = menuBar()->addMenu(tr("&View"));
     view->addAction(sceneDock_->toggleViewAction());
     view->addAction(inspectorDock_->toggleViewAction());
+    view->addAction(assetsDock_->toggleViewAction());
     view->addAction(tr("Reset panel layout"),this,&StudioWindow::resetPanels);
     view->addAction(tr("Frame selection"),this,[this]{if(project_) viewport_->frameSelection();});
     view->addAction(tr("Reset camera"),this,[this]{if(project_) viewport_->resetView();});
@@ -106,8 +108,10 @@ void StudioWindow::resetPanels() {
     restoreState(initialLayout_,1);
     sceneDock_->show();
     inspectorDock_->show();
+    assetsDock_->show();
     tools_->show();
     resizeDocks({sceneDock_,inspectorDock_},{220,292},Qt::Horizontal);
+    resizeDocks({assetsDock_},{270},Qt::Vertical);
 }
 
 void StudioWindow::notify(const QString& message) {
@@ -152,9 +156,11 @@ void StudioWindow::toHub() {
     if (project_) QSettings().setValue("studioLayout",saveState(1));
     runtime_.reset(); project_.reset(); selected_.clear();
     pages_->setCurrentWidget(hub_);
-    sceneDock_->hide(); inspectorDock_->hide(); tools_->hide();
+    sceneDock_->hide(); inspectorDock_->hide(); assetsDock_->hide(); tools_->hide();
     sceneDock_->toggleViewAction()->setEnabled(false);
     inspectorDock_->toggleViewAction()->setEnabled(false);
+    assetsDock_->toggleViewAction()->setEnabled(false);
+    refreshAssets();
     for (auto* action : {saveAction_,restore_,undo_,redo_,duplicate_,repeat_,erase_,playAction_,homeAction_}) action->setEnabled(false);
     backend_->hide();
     const auto path=QSettings().value("recentProject").toString();
@@ -179,6 +185,7 @@ void StudioWindow::attach(platz::Project project) {
     }
     sceneDock_->toggleViewAction()->setEnabled(true);
     inspectorDock_->toggleViewAction()->setEnabled(true);
+    assetsDock_->toggleViewAction()->setEnabled(true);
     backend_->show();
     viewport_->resetView();
     QSettings().setValue("recentProject",QString::fromStdWString(project_->path().wstring()));
@@ -214,7 +221,7 @@ void StudioWindow::closeEvent(QCloseEvent* event) {
     event->accept();
 }
 
-void StudioWindow::refresh() {
+void StudioWindow::refresh(const std::string& preferredAsset) {
     if (!project_) return;
     QScopedValueRollback<bool> refreshing(refreshing_,true);
     const auto& objects=runtime_ ? runtime_->objects() : project_->objects();
@@ -245,6 +252,7 @@ void StudioWindow::refresh() {
     saveAction_->setEnabled(!runtime_);
     restore_->setEnabled(!runtime_ && project_->canRestorePrevious());
     syncInspector();
+    refreshAssets(preferredAsset);
     viewport_->setScene(objects,selected_);
 }
 void StudioWindow::syncInspector() {
@@ -262,6 +270,7 @@ void StudioWindow::syncInspector() {
     duplicate_->setEnabled(editable);
     repeat_->setEnabled(editable);
     erase_->setEnabled(editable);
+    updateAssetActions();
     if (!object) {
         name_->clear(); mesh_->setText(tr("Select an object")); identity_->clear(); color_->clear();
         mesh_->setToolTip({});

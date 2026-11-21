@@ -15,6 +15,7 @@ class QListWidget;
 class QPushButton;
 class QStackedWidget;
 class QToolBar;
+class QTreeWidget;
 class Viewport;
 
 class StudioWindow final : public QMainWindow {
@@ -31,7 +32,7 @@ private:
     Viewport* viewport_{};
     QWidget* hub_{};
     QWidget* inspector_{};
-    QDockWidget *sceneDock_{}, *inspectorDock_{};
+    QDockWidget *sceneDock_{}, *inspectorDock_{}, *assetsDock_{};
     QToolBar* tools_{};
     QListWidget* tree_{};
     QLineEdit *name_{}, *color_{};
@@ -39,16 +40,24 @@ private:
     QLabel *projectTitle_{}, *mode_{}, *count_{}, *mesh_{}, *identity_{}, *backend_{}, *notice_{}, *recent_{}, *controls_{};
     QPushButton *play_{}, *save_{}, *add_{}, *swatch_{}, *recentOpen_{};
     QPushButton* saveGlb_{};
+    QTreeWidget* assetList_{};
+    QPushButton *importAsset_{}, *placeAsset_{}, *assignAsset_{}, *manageAsset_{};
+    QAction *replaceInstances_{}, *removeAsset_{};
     QAction *undo_{}, *redo_{}, *saveAction_{}, *restore_{}, *playAction_{}, *homeAction_{};
     QAction *duplicate_{}, *erase_{};
     QAction* repeat_{};
     void repeatObjects();
     void saveEmbeddedGlb();
+    void writeGlbSource(std::shared_ptr<const platz::MeshAsset> source);
     QByteArray initialLayout_;
     bool refreshing_{};
     void buildHub();
     void buildStudio();
     void buildInspector();
+    void buildAssets();
+    void refreshAssets(const std::string& preferred = {});
+    void updateAssetActions();
+    std::string selectedAsset() const;
     void buildMenus();
     bool confirmLeave();
     bool saveChanges();
@@ -56,7 +65,7 @@ private:
     void chooseProject();
     void attach(platz::Project project);
     void toHub();
-    void refresh();
+    void refresh(const std::string& preferredAsset = {});
     void syncInspector();
     void applyEdit(const std::function<void(platz::Object&)>& change);
     void finishActiveField();

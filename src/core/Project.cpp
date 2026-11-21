@@ -16,17 +16,19 @@
 #include <cstdio>
 #include <stdexcept>
 #include <unordered_set>
-#include <unordered_map>
 
 namespace platz {
 namespace {
 namespace fs = std::filesystem;
 constexpr int maxObjects = 512;
+constexpr int maxMeshes = 512;
 constexpr int maxUndo = 128;
 constexpr std::uintmax_t maxFileBytes = 64 * 1024 * 1024;
 constexpr std::size_t maxMeshSourceBytes = 8u << 20;
 constexpr int applicationId = 0x504C545A;
 constexpr const char* assetsSql = "CREATE TABLE assets(key TEXT PRIMARY KEY,source BLOB NOT NULL)";
+constexpr const char* meshLibrarySql =
+    "CREATE TABLE mesh_library(rev INTEGER NOT NULL,key TEXT NOT NULL,name TEXT NOT NULL,PRIMARY KEY(rev,key))";
 constexpr const char* projectSql =
     "CREATE TABLE project(singleton INTEGER PRIMARY KEY CHECK(singleton=1),"
     "id TEXT NOT NULL,scene TEXT NOT NULL,name TEXT NOT NULL,head INTEGER NOT NULL,token TEXT NOT NULL)";
@@ -185,13 +187,14 @@ struct Metadata { std::string id,scene,name,token; std::uint64_t head; int versi
 Metadata readMeta(Database& db) {
     if (scalar(db,"PRAGMA application_id") != applicationId) fail("This file is not a PLATZ project.");
     auto version = scalar(db,"PRAGMA user_version");
-    if (version<1 || version>3) fail("Unsupported PLATZ project version. Open it with a compatible build.");
+    if (version<1 || version>4) fail("Unsupported PLATZ project version. Open it with a compatible build.");
     Statement schema(db,"SELECT name,sql FROM sqlite_schema WHERE sql IS NOT NULL ORDER BY name");
     auto checkTable = [&](const char* name, const char* definition) {
         if (!schema.row() || schema.str(0) != name || schema.str(1) != definition)
             fail("Unrecognized project schema. The original file was preserved.");
     };
     if (version>=3) checkTable("assets",assetsSql);
+    if (version>=4) checkTable("mesh_library",meshLibrarySql);
     checkTable("objects", objectsSql);
     checkTable("project", projectSql);
     if (version >= 2) checkTable("snapshots", snapshotsSql);
@@ -206,13 +209,38 @@ Metadata readMeta(Database& db) {
     validateName(meta.name);
     return meta;
 }
-std::vector<Object> readObjects(Database& db, std::uint64_t rev, int version) {
+LibraryMesh readMesh(Database& db, const std::string& key, std::string name, std::size_t& totalBytes) {
+    validateName(name);
+    Statement blob(db,"SELECT source FROM assets WHERE key=?");
+    blob.bind(1,key);
+    if (!blob.row() || sqlite3_column_type(blob.stmt,0)!=SQLITE_BLOB) fail("Missing embedded mesh.");
+    const auto size=sqlite3_column_bytes(blob.stmt,0);
+    if (size<=0 || size>MeshAsset::maxBytes) fail("Invalid embedded mesh size.");
+    totalBytes+=size;
+    if (totalBytes>maxMeshSourceBytes) fail("Embedded mesh library exceeds 8 MiB.");
+    const auto* bytes=static_cast<const std::uint8_t*>(sqlite3_column_blob(blob.stmt,0));
+    if (!bytes) fail("Could not read embedded mesh.");
+    auto mesh=MeshAsset::decode({bytes,static_cast<size_t>(size)});
+    if (key!="glb:"+mesh->digest()) fail("Embedded mesh digest mismatch.");
+    return {std::move(name),{std::move(mesh)}};
+}
+std::vector<Object> readObjects(Database& db, std::uint64_t rev, int version, MeshLibrary& library) {
+    std::size_t assetBytes=0;
+    if (version>=4) {
+        Statement catalog(db,"SELECT key,name FROM mesh_library WHERE rev=? LIMIT 513");
+        catalog.bind(1,static_cast<std::int64_t>(rev));
+        while (catalog.row()) {
+            if (library.size()>=maxMeshes) fail("Mesh library exceeds 512 assets.");
+            const auto key=catalog.str(0);
+            auto entry=readMesh(db,key,catalog.str(1),assetBytes);
+            const auto digest=entry.asset.data->digest();
+            library.emplace(digest,std::move(entry));
+        }
+    }
     Statement q(db,"SELECT id,name,mesh,px,py,pz,rx,ry,rz,sx,sy,sz,cr,cg,cb FROM objects WHERE rev=? ORDER BY seq LIMIT 513");
     q.bind(1,static_cast<std::int64_t>(rev));
     std::vector<Object> result;
     std::unordered_set<std::string> ids;
-    std::unordered_map<std::string,MeshReference> assets;
-    std::size_t assetBytes=0;
     while (q.row()) {
         if (result.size() >= maxObjects) fail("This build supports up to 512 scene objects.");
         const auto key=q.str(2);
@@ -221,21 +249,13 @@ std::vector<Object> readObjects(Database& db, std::uint64_t rev, int version) {
                  {q.number(6),q.number(7),q.number(8)},{q.number(9),q.number(10),q.number(11)},
                  {q.number(12),q.number(13),q.number(14)}};
         if (imported) {
-            auto& ref=assets[key];
-            if (!ref.data) {
-                Statement blob(db,"SELECT source FROM assets WHERE key=?");
-                blob.bind(1,key);
-                if(!blob.row() || sqlite3_column_type(blob.stmt,0)!=SQLITE_BLOB) fail("Missing embedded mesh.");
-                const auto n=sqlite3_column_bytes(blob.stmt,0);
-                if(n<=0 || n>MeshAsset::maxBytes) fail("Invalid embedded mesh size.");
-                assetBytes+=n;
-                if(assetBytes>maxMeshSourceBytes) fail("Embedded mesh budget exceeded.");
-                auto* bytes=static_cast<const std::uint8_t*>(sqlite3_column_blob(blob.stmt,0));
-                if (!bytes) fail("Could not read embedded mesh.");
-                ref.data=MeshAsset::decode({bytes,static_cast<size_t>(n)});
-                if(key!="glb:"+ref.data->digest()) fail("Embedded mesh digest mismatch.");
+            const auto digest=key.substr(4);
+            auto asset=library.find(digest);
+            if (asset==library.end()) {
+                if (version>=4) fail("Scene references a mesh outside its library.");
+                asset=library.emplace(digest,readMesh(db,key,o.name,assetBytes)).first;
             }
-            o.asset=ref;
+            o.asset=asset->second.asset;
         }
         validate(o);
         if (!ids.insert(o.id).second) fail("Duplicate object identity in project.");
@@ -252,10 +272,46 @@ std::vector<Object> readObjects(Database& db, std::uint64_t rev, int version) {
     return result;
 }
 void requireCurrent(Database& db, const Metadata& meta, const Project& project, const std::string& token,
-                    const std::vector<Object>& saved) {
+                    const std::vector<Object>& savedObjects, const MeshLibrary& savedMeshes) {
+    constexpr auto conflict="The saved project changed on disk. Reopen it before saving changes.";
     if (meta.id != project.id() || meta.scene != project.sceneId() || meta.name != project.name() ||
-        meta.head != project.savedRevision() || meta.token != token || readObjects(db, meta.head, meta.version) != saved)
-        fail("The saved project changed on disk. Reopen it before saving changes.");
+        meta.head != project.savedRevision() || meta.token != token) fail(conflict);
+    MeshLibrary observed;
+    if (readObjects(db,meta.head,meta.version,observed)!=savedObjects || observed!=savedMeshes) fail(conflict);
+}
+void putLibrary(Database& db, const MeshLibrary& library, std::uint64_t rev) {
+    Statement member(db,"INSERT INTO mesh_library VALUES(?,?,?)");
+    Statement blob(db,"INSERT INTO assets(key,source) VALUES(?,?) ON CONFLICT(key) "
+                      "DO UPDATE SET source=excluded.source WHERE assets.source<>excluded.source");
+    for (const auto& [digest,mesh] : library) {
+        const auto key="glb:"+digest;
+        const auto& bytes=mesh.asset.data->source();
+        blob.bind(1,key);
+        blob.check(sqlite3_bind_blob(blob.stmt,2,bytes.data(),static_cast<int>(bytes.size()),SQLITE_TRANSIENT));
+        blob.done();
+        blob.check(sqlite3_reset(blob.stmt));
+        member.bind(1,static_cast<std::int64_t>(rev));
+        member.bind(2,key);
+        member.bind(3,mesh.name);
+        member.done();
+        member.check(sqlite3_reset(member.stmt));
+    }
+}
+const LibraryMesh& findMesh(const MeshLibrary& library, const std::string& digest) {
+    const auto item=library.find(digest);
+    if (item==library.end()) fail("That mesh is no longer in the asset library.");
+    return item->second;
+}
+std::string registerMesh(MeshLibrary& library, const fs::path& source) {
+    auto mesh=MeshAsset::load(source);
+    auto digest=mesh->digest();
+    if (!library.contains(digest)) {
+        const auto stem=source.stem().u8string();
+        std::string name(stem.begin(),stem.end());
+        validateName(name);
+        library.emplace(digest,LibraryMesh{std::move(name),{std::move(mesh)}});
+    }
+    return digest;
 }
 void putObjects(Database& db, const std::vector<Object>& objects, std::uint64_t rev) {
     Statement snapshot(db,"INSERT INTO snapshots VALUES(?,?)");
@@ -306,6 +362,13 @@ void publishNew(const fs::path& temp, const fs::path& dest) {
 Object makeObject(Mesh mesh, std::string name, Vec3 p, Vec3 s, Vec3 c) {
     return {newId(),std::move(name),mesh,p,{},s,c};
 }
+std::string placeMesh(std::vector<Object>& objects, const LibraryMesh& entry) {
+    if (objects.size()>=maxObjects) fail("This build supports up to 512 scene objects.");
+    auto object=makeObject(Mesh::Imported,entry.name,{},{1,1,1},{0.74f,0.78f,0.80f});
+    object.asset=entry.asset;
+    objects.push_back(std::move(object));
+    return objects.back().id;
+}
 } // namespace
 
 const char* meshName(Mesh mesh) {
@@ -325,14 +388,14 @@ Project Project::create(const fs::path& path, const std::string& name) {
     if (fs::exists(p.path_)) fail("A file already exists at this location. Choose a new project name.");
     p.id_=newId(); p.sceneId_=newId(); p.diskToken_=newId();
     p.name_=name; p.head_=p.revision_=1;
-    p.objects_={
+    p.scene_.objects={
         makeObject(Mesh::Cube,"Platform",{0,-0.15f,0},{6.6f,0.3f,4.4f},{0.24f,0.28f,0.30f}),
         makeObject(Mesh::Cylinder,"Column",{-1.55f,1.1f,-0.25f},{1.45f,2.2f,1.45f},{0.30f,0.71f,0.55f}),
         makeObject(Mesh::Sphere,"Sphere",{0.20f,0.82f,0.74f},{1.64f,1.64f,1.64f},{0.96f,0.64f,0.27f}),
         makeObject(Mesh::Cube,"Block",{1.62f,0.70f,-0.76f},{1.32f,1.40f,1.32f},{0.76f,0.82f,0.84f})
     };
-    p.objects_.back().rotation.y=16;
-    p.saved_=p.objects_;
+    p.scene_.objects.back().rotation.y=16;
+    p.saved_=p.scene_;
     PendingFile temp{reserveTemp(p.path_)};
     {
         Database db(temp.path,SQLITE_OPEN_READWRITE);
@@ -342,7 +405,7 @@ Project Project::create(const fs::path& path, const std::string& name) {
         Statement q(db,"INSERT INTO project VALUES(1,?,?,?,?,?)");
         q.bind(1,p.id_); q.bind(2,p.sceneId_); q.bind(3,name);
         q.bind(4,static_cast<std::int64_t>(p.head_)); q.bind(5,p.diskToken_);
-        q.done(); putObjects(db,p.objects_,p.head_); db.exec("COMMIT");
+        q.done(); putObjects(db,p.scene_.objects,p.head_); db.exec("COMMIT");
     }
     publishNew(temp.path,p.path_);
     return p;
@@ -355,16 +418,18 @@ Project Project::open(const fs::path& path) {
     db.exec("BEGIN");
     auto meta=readMeta(db);
     p.id_=meta.id; p.sceneId_=meta.scene; p.name_=meta.name; p.head_=p.revision_=meta.head;
-    p.diskToken_=meta.token; p.objects_=readObjects(db,meta.head,meta.version); p.saved_=p.objects_;
+    p.diskToken_=meta.token;
+    p.scene_.objects=readObjects(db,meta.head,meta.version,p.scene_.meshes);
+    p.saved_=p.scene_;
     p.hasPrevious_ = scalar(db,meta.version == 1 ? "SELECT count(DISTINCT rev) FROM objects" :
                                                    "SELECT count(*) FROM snapshots") > 1;
     db.exec("COMMIT"); return p;
 }
 const Object* Project::find(const std::string& id) const {
-    auto it = std::find_if(objects_.begin(),objects_.end(),[&](const Object& o){ return o.id == id; });
-    return it == objects_.end() ? nullptr : &*it;
+    auto it = std::find_if(scene_.objects.begin(),scene_.objects.end(),[&](const Object& o){ return o.id == id; });
+    return it == scene_.objects.end() ? nullptr : &*it;
 }
-bool Project::dirty() const { return objects_ != saved_; }
+bool Project::dirty() const { return scene_ != saved_; }
 void Project::requireRevision(std::uint64_t expectedRevision) const {
     if (expectedRevision != revision_) fail("The source revision changed. Review the edit again.");
 }
@@ -377,19 +442,19 @@ ObjectEdit Project::stage(const Object& replacement, std::uint64_t expectedRevis
     auto* old=find(replacement.id);
     if (!old) fail("The target object does not exist in this scene.");
     validate(replacement);
+    if (replacement.asset.data) findMesh(scene_.meshes,replacement.asset.data->digest());
     return {id_,sceneId_,revision_,*old,replacement};
 }
-void Project::replace(std::vector<Object> next) {
-    if (next == objects_) return;
+void Project::replace(SceneState next) {
+    if (next == scene_) return;
     requireRevisionCapacity();
+    if (next.meshes.size()>maxMeshes) fail("Mesh library exceeds 512 assets.");
     size_t bytes=0;
-    std::unordered_set<std::string> unique;
-    for (const auto& o:next)
-        if(o.asset.data && unique.insert(o.asset.data->digest()).second) bytes+=o.asset.data->source().size();
-    if(bytes>maxMeshSourceBytes) fail("A scene can reference up to 8 MiB of unique embedded meshes.");
-    undo_.push_back(objects_);
+    for (const auto& item:next.meshes) bytes+=item.second.asset.data->source().size();
+    if (bytes>maxMeshSourceBytes) fail("The asset library supports up to 8 MiB of embedded meshes.");
+    undo_.push_back(scene_);
     if (undo_.size() > maxUndo) undo_.erase(undo_.begin());
-    objects_=std::move(next); redo_.clear(); ++revision_;
+    scene_=std::move(next); redo_.clear(); ++revision_;
 }
 void Project::apply(const ObjectEdit& proposal) {
     if (proposal.projectId != id_ || proposal.sceneId != sceneId_ || proposal.expectedRevision != revision_)
@@ -398,8 +463,10 @@ void Project::apply(const ObjectEdit& proposal) {
     if (!old || *old != proposal.before || proposal.after.id != old->id)
         fail("Proposal has invalid identity or outdated source values.");
     validate(proposal.after);
-    auto next=objects_;
-    next[static_cast<size_t>(old-objects_.data())]=proposal.after;
+    auto changed=proposal.after;
+    if (changed.asset.data) changed.asset=findMesh(scene_.meshes,changed.asset.data->digest()).asset;
+    auto next=scene_;
+    next.objects[static_cast<size_t>(old-scene_.objects.data())]=std::move(changed);
     replace(std::move(next));
 }
 void Project::edit(const Object& replacement, std::uint64_t expectedRevision) {
@@ -407,22 +474,68 @@ void Project::edit(const Object& replacement, std::uint64_t expectedRevision) {
 }
 std::string Project::add(Mesh mesh) {
     if(mesh==Mesh::Imported) fail("Choose a GLB file to add an imported mesh.");
-    if (objects_.size() >= maxObjects) fail("This build supports up to 512 scene objects.");
-    auto o=makeObject(mesh, std::string(meshName(mesh))+" "+std::to_string(objects_.size()+1),
+    if (scene_.objects.size() >= maxObjects) fail("This build supports up to 512 scene objects.");
+    auto o=makeObject(mesh, std::string(meshName(mesh))+" "+std::to_string(scene_.objects.size()+1),
                       {0,0.5f,0},{1,1,1},{0.47f,0.72f,0.68f});
-    auto next=objects_; next.push_back(o); replace(std::move(next)); return o.id;
+    auto next=scene_; next.objects.push_back(o); replace(std::move(next)); return o.id;
 }
 std::string Project::importMesh(const std::filesystem::path& source,std::uint64_t expectedRevision) {
     requireRevision(expectedRevision);
-    if(objects_.size()>=maxObjects) fail("This build supports up to 512 scene objects.");
-    auto asset=MeshAsset::load(source);
-    const auto name=source.stem().u8string();
-    auto o=makeObject(Mesh::Imported,{name.begin(),name.end()},{},{1,1,1},{0.74f,0.78f,0.80f});
-    for (const auto& item:objects_) if(item.asset.data && item.asset.data->digest()==asset->digest()) {
-        asset=item.asset.data; break;
+    auto next=scene_;
+    const auto digest=registerMesh(next.meshes,source);
+    const auto id=placeMesh(next.objects,findMesh(next.meshes,digest));
+    replace(std::move(next));
+    return id;
+}
+std::string Project::importMeshAsset(const std::filesystem::path& source, std::uint64_t expectedRevision) {
+    requireRevision(expectedRevision);
+    auto next=scene_;
+    auto digest=registerMesh(next.meshes,source);
+    replace(std::move(next));
+    return digest;
+}
+std::string Project::instantiateMesh(const std::string& digest, std::uint64_t expectedRevision) {
+    requireRevision(expectedRevision);
+    auto next=scene_;
+    auto id=placeMesh(next.objects,findMesh(next.meshes,digest));
+    replace(std::move(next));
+    return id;
+}
+void Project::assignMesh(const std::string& objectId, const std::string& digest, std::uint64_t expectedRevision) {
+    requireRevision(expectedRevision);
+    const auto* object=find(objectId);
+    if (!object) fail("The target object does not exist in this scene.");
+    auto replacement=*object;
+    replacement.mesh=Mesh::Imported;
+    replacement.asset=findMesh(scene_.meshes,digest).asset;
+    edit(replacement,expectedRevision);
+}
+std::string Project::replaceMeshInstances(const std::string& digest, const std::filesystem::path& source,
+                                          std::uint64_t expectedRevision) {
+    requireRevision(expectedRevision);
+    const auto& original=findMesh(scene_.meshes,digest).asset;
+    auto next=scene_;
+    const auto newDigest=registerMesh(next.meshes,source);
+    const auto& replacement=findMesh(next.meshes,newDigest).asset;
+    bool used=false;
+    for (auto& object: next.objects) {
+        if (object.asset==original) {
+            object.asset=replacement;
+            used=true;
+        }
     }
-    o.asset.data=std::move(asset); validate(o);
-    auto next=objects_; next.push_back(o); replace(std::move(next)); return o.id;
+    if (!used) fail("The selected mesh has no instances to replace.");
+    replace(std::move(next));
+    return newDigest;
+}
+void Project::removeMeshAsset(const std::string& digest, std::uint64_t expectedRevision) {
+    requireRevision(expectedRevision);
+    const auto& asset=findMesh(scene_.meshes,digest).asset;
+    if (std::any_of(scene_.objects.begin(),scene_.objects.end(),[&](const Object& o){return o.asset==asset;}))
+        fail("Reassign or remove all instances before removing this asset.");
+    auto next=scene_;
+    next.meshes.erase(digest);
+    replace(std::move(next));
 }
 std::string Project::duplicate(const std::string& objectId, std::uint64_t expectedRevision) {
     return repeat(objectId, expectedRevision, 1, {});
@@ -432,7 +545,7 @@ std::vector<Object> Project::previewRepeat(const std::string& objectId, std::uin
     requireRevision(expectedRevision);
     const Object* source = find(objectId);
     if (!source) fail("The target object does not exist in this scene.");
-    if (copies == 0 || copies > maxObjects - objects_.size())
+    if (copies == 0 || copies > maxObjects - scene_.objects.size())
         fail("The scene must fit within 512 objects including all copies.");
     std::vector<Object> result;
     result.reserve(copies);
@@ -456,9 +569,9 @@ std::vector<Object> Project::previewRepeat(const std::string& objectId, std::uin
 std::string Project::repeat(const std::string& objectId, std::uint64_t expectedRevision,
                             unsigned copies, Vec3 spacing) {
     auto additions = previewRepeat(objectId, expectedRevision, copies, spacing);
-    const auto index = find(objectId) - objects_.data();
-    auto next = objects_;
-    next.insert(next.begin()+index+1, additions.begin(), additions.end());
+    const auto index = find(objectId) - scene_.objects.data();
+    auto next = scene_;
+    next.objects.insert(next.objects.begin()+index+1, additions.begin(), additions.end());
     replace(std::move(next));
     return additions.back().id;
 }
@@ -466,57 +579,59 @@ void Project::remove(const std::string& objectId, std::uint64_t expectedRevision
     requireRevision(expectedRevision);
     const Object* source = find(objectId);
     if (!source) fail("The target object does not exist in this scene.");
-    auto next = objects_;
-    next.erase(next.begin() + (source - objects_.data()));
+    auto next = scene_;
+    next.objects.erase(next.objects.begin() + (source - scene_.objects.data()));
     replace(std::move(next));
 }
 void Project::undo() {
     if (!canUndo()) return;
     requireRevisionCapacity();
-    redo_.push_back(objects_); objects_=std::move(undo_.back()); undo_.pop_back(); ++revision_;
+    redo_.push_back(scene_); scene_=std::move(undo_.back()); undo_.pop_back(); ++revision_;
 }
 void Project::redo() {
     if (!canRedo()) return;
     requireRevisionCapacity();
-    undo_.push_back(objects_); objects_=std::move(redo_.back()); redo_.pop_back(); ++revision_;
+    undo_.push_back(scene_); scene_=std::move(redo_.back()); redo_.pop_back(); ++revision_;
 }
 void Project::restorePrevious() {
     if (!hasPrevious_) fail("This project has no previous saved revision.");
     checkFile(path_); Database db(path_,SQLITE_OPEN_READWRITE);
-    db.exec("BEGIN"); auto meta=readMeta(db); requireCurrent(db,meta,*this,diskToken_,saved_);
+    db.exec("BEGIN"); auto meta=readMeta(db);
+    requireCurrent(db,meta,*this,diskToken_,saved_.objects,saved_.meshes);
     Statement prev(db,meta.version == 1 ? "SELECT MAX(rev) FROM objects WHERE rev < ?" :
                                          "SELECT MAX(rev) FROM snapshots WHERE rev < ?");
     prev.bind(1,static_cast<std::int64_t>(head_));
     if (!prev.row()) fail("Previous saved revision unavailable.");
-    auto previous=readObjects(db,prev.integer(0),meta.version); db.exec("COMMIT");
+    SceneState previous;
+    previous.objects=readObjects(db,prev.integer(0),meta.version,previous.meshes);
+    db.exec("COMMIT");
     replace(std::move(previous));
 }
 void Project::save() {
     checkFile(path_);
     Database db(path_,SQLITE_OPEN_READWRITE);
     db.exec("BEGIN IMMEDIATE");
-    auto meta=readMeta(db); requireCurrent(db,meta,*this,diskToken_,saved_);
+    auto meta=readMeta(db);
+    requireCurrent(db,meta,*this,diskToken_,saved_.objects,saved_.meshes);
     if (!dirty()) { db.exec("COMMIT"); return; }
     auto nextToken=newId();
-    auto savedCopy=objects_;
+    auto savedCopy=scene_;
     if (meta.version == 1) {
         db.exec(snapshotsSql);
         db.exec("INSERT INTO snapshots SELECT rev,count(*) FROM objects GROUP BY rev");
         db.exec("PRAGMA user_version=2");
     }
-    bool embedded=std::any_of(objects_.begin(),objects_.end(),[](const auto& o){return bool(o.asset.data);});
-    if(embedded && meta.version<3) { db.exec(assetsSql); db.exec("PRAGMA user_version=3"); }
-    if(embedded) {
-        std::unordered_set<std::string> inserted;
-        for(const auto& o:objects_) if(o.asset.data && inserted.insert(o.asset.data->digest()).second) {
-            const auto& bytes=o.asset.data->source();
-            Statement blob(db,"INSERT INTO assets(key,source) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET source=excluded.source WHERE assets.source<>excluded.source");
-            blob.bind(1,"glb:"+o.asset.data->digest());
-            blob.check(sqlite3_bind_blob(blob.stmt,2,bytes.data(),static_cast<int>(bytes.size()),SQLITE_TRANSIENT));
-            blob.done();
+    const bool hasLibrary=meta.version>=3 || !scene_.meshes.empty();
+    if (hasLibrary) {
+        if (meta.version<4) {
+            if (meta.version<3) db.exec(assetsSql);
+            db.exec(meshLibrarySql);
+            putLibrary(db,saved_.meshes,head_);
+            db.exec("PRAGMA user_version=4");
         }
+        putLibrary(db,scene_.meshes,revision_);
     }
-    putObjects(db,objects_,revision_);
+    putObjects(db,scene_.objects,revision_);
     Statement update(db,"UPDATE project SET head=?,token=? WHERE singleton=1 AND token=?");
     update.bind(1,static_cast<std::int64_t>(revision_)); update.bind(2,nextToken);
     update.bind(3,diskToken_); update.done();
@@ -525,7 +640,12 @@ void Project::save() {
     prune.bind(1,static_cast<std::int64_t>(head_)); prune.done();
     Statement pruneSnapshots(db,"DELETE FROM snapshots WHERE rev < ?");
     pruneSnapshots.bind(1,static_cast<std::int64_t>(head_)); pruneSnapshots.done();
-    if(embedded || meta.version>=3) db.exec("DELETE FROM assets WHERE key NOT IN (SELECT mesh FROM objects)");
+    if (hasLibrary) {
+        Statement pruneLibrary(db,"DELETE FROM mesh_library WHERE rev < ?");
+        pruneLibrary.bind(1,static_cast<std::int64_t>(head_));
+        pruneLibrary.done();
+        db.exec("DELETE FROM assets WHERE key NOT IN (SELECT key FROM mesh_library)");
+    }
     if(scalar(db,"PRAGMA page_count")*scalar(db,"PRAGMA page_size")>maxFileBytes)
         fail("Project exceeds the supported file size.");
     db.exec("COMMIT");

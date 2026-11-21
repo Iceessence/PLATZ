@@ -174,7 +174,8 @@ void StudioWindow::buildStudio() {
         auto path=QFileDialog::getOpenFileName(this,tr("Import mesh geometry"),{},tr("Binary glTF mesh (*.glb)"),nullptr,QFileDialog::DontUseNativeDialog);
         if (!path.isEmpty()) protectedCall([&]{
             selected_=project_->importMesh(path.toStdWString(),project_->revision());
-            refresh(); viewport_->frameSelection();
+            refresh(project_->find(selected_)->asset.data->digest());
+            viewport_->frameSelection();
             notify(tr("Imported local-space geometry only. Save to embed the original GLB."));
         });
     });
@@ -189,6 +190,7 @@ void StudioWindow::buildStudio() {
         if (!refreshing_) select(item ? item->data(Qt::UserRole).toString().toStdString() : std::string{},false);
     });
     buildInspector();
+    buildAssets();
     backend_=label(tr("Awaiting viewport"),"minor");
     backend_->setObjectName("activeBackend");
     statusBar()->addPermanentWidget(backend_);
@@ -312,7 +314,10 @@ void StudioWindow::saveEmbeddedGlb() {
     if (!project_ || runtime_) return;
     const auto* selected=project_->find(selected_);
     if (!selected || !selected->asset.data) return;
-    const auto source=selected->asset.data;
+    writeGlbSource(selected->asset.data);
+}
+
+void StudioWindow::writeGlbSource(std::shared_ptr<const platz::MeshAsset> source) {
     QFileDialog dialog(this,tr("Save original GLB"),{},tr("Binary glTF (*.glb)"));
     dialog.setOptions(QFileDialog::DontConfirmOverwrite|QFileDialog::DontUseNativeDialog);
     dialog.setAcceptMode(QFileDialog::AcceptSave);

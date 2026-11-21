@@ -16,6 +16,7 @@
 #include <QTemporaryDir>
 #include <QTest>
 #include <QTimer>
+#include <QTreeWidget>
 #include <QSpinBox>
 #include <algorithm>
 #include <cmath>
@@ -152,6 +153,90 @@ void exerciseImport(QTemporaryDir& dir) {
         check(window.close(),"Saving source bytes made an unrelated project edit");
     }
     std::cout<<"GLB import, Vulkan pick, isolated Play, pixel-identical reopen and byte-exact no-clobber extraction passed\n";
+}
+void exerciseAssetLibrary(QTemporaryDir& dir) {
+    const auto file=dir.filePath("Asset library.platz");
+    std::string objectId;
+    std::vector<platz::Object> expectedObjects;
+    Capture expectedFrame;
+    {
+        StudioWindow window;
+        expose(window);
+        fileAction(window,Qt::Key_N,file);
+        auto* library=control<QTreeWidget>(window,"meshLibrary");
+        auto* scene=control<QListWidget>(window,"sceneTree");
+        auto* viewport=static_cast<Viewport*>(control<QWidget>(window,"viewport"));
+        auto* place=control<QPushButton>(window,"placeMeshAsset");
+        auto* assign=control<QPushButton>(window,"assignMeshAsset");
+        auto* replace=control<QAction>(window,"replaceMeshInstances");
+        auto* remove=control<QAction>(window,"removeMeshAsset");
+        chooseFile(PLATZ_TEST_MESH,[&]{
+            QTest::mouseClick(control<QPushButton>(window,"importMeshAsset"),Qt::LeftButton);
+        });
+        check(library->isVisible() && library->topLevelItemCount()==1 && scene->count()==4 &&
+              library->currentItem()->data(1,Qt::DisplayRole).toInt()==0,
+              "Library import did not create a zero-use asset");
+        QTest::mouseClick(place,Qt::LeftButton);
+        objectId=scene->currentItem()->data(Qt::UserRole).toString().toStdString();
+        check(scene->count()==5 && library->currentItem()->data(1,Qt::DisplayRole).toInt()==1,
+              "Add instance failed to update the scene and reference count");
+        enterText(control<QDoubleSpinBox>(window,"positionY"),"3.5");
+        scene->setCurrentRow(3);
+        const auto blockId=scene->currentItem()->data(Qt::UserRole);
+        QTest::mouseClick(assign,Qt::LeftButton);
+        check(scene->currentItem()->data(Qt::UserRole)==blockId &&
+              library->currentItem()->data(1,Qt::DisplayRole).toInt()==2 && !remove->isEnabled(),
+              "Assign replaced object identity or let a referenced mesh be removed");
+        scene->setCurrentRow(4);
+        viewport->setFocus();
+        QTest::keyClick(viewport,Qt::Key_F);
+        const auto before=settledFrame(*viewport);
+        chooseFile(PLATZ_TEST_REPLACEMENT,[&]{replace->trigger();});
+        expectedFrame=settledFrame(*viewport);
+        check(expectedFrame.tokens!=before.tokens && library->topLevelItemCount()==2 &&
+              library->currentItem()->text(0)=="Low spire" &&
+              library->currentItem()->data(1,Qt::DisplayRole).toInt()==2,
+              "Bulk replacement did not change the GPU mesh or update both references");
+        viewport->setFocus();
+        QTest::keyClick(viewport,Qt::Key_Z,Qt::ControlModifier);
+        check(settledFrame(*viewport).tokens==before.tokens && library->topLevelItemCount()==1,
+              "Undo left the replacement in the scene or catalog");
+        QTest::keyClick(viewport,Qt::Key_Y,Qt::ControlModifier);
+        check(settledFrame(*viewport).tokens==expectedFrame.tokens,"Redo changed the replacement shape");
+        for (int row=0;row<library->topLevelItemCount();++row)
+            if (library->topLevelItem(row)->text(0)=="Oblique spire")
+                library->setCurrentItem(library->topLevelItem(row));
+        check(remove->isEnabled(),"Unused original asset could not be removed");
+        remove->trigger();
+        check(library->topLevelItemCount()==1,"Removing an unused asset left it in the library");
+
+        auto* play=control<QPushButton>(window,"playButton");
+        QTest::mouseClick(play,Qt::LeftButton);
+        check(!place->isEnabled() && !assign->isEnabled() && !replace->isEnabled(),
+              "Assets dock left authoring actions enabled during Play");
+        const auto point=visiblePoint(settledFrame(*viewport),5,*viewport);
+        QTest::mouseClick(viewport,Qt::LeftButton,{},point);
+        check(settledFrame(*viewport).tokens!=expectedFrame.tokens,"Replaced mesh did not interact in Play");
+        QTest::mouseClick(play,Qt::LeftButton);
+        check(settledFrame(*viewport).rgba==expectedFrame.rgba,"Play altered the authored mesh after Stop");
+        QTest::mouseClick(control<QPushButton>(window,"saveButton"),Qt::LeftButton);
+        expectedObjects=platz::Project::open(file.toStdWString()).objects();
+        check(window.close(),"Library project did not close after Save");
+    }
+    {
+        StudioWindow window;
+        expose(window);
+        fileAction(window,Qt::Key_O,file);
+        auto* library=control<QTreeWidget>(window,"meshLibrary");
+        auto* scene=control<QListWidget>(window,"sceneTree");
+        const auto saved=platz::Project::open(file.toStdWString());
+        check(saved.find(objectId) && saved.objects()==expectedObjects && library->topLevelItemCount()==1 &&
+              library->currentItem()->text(0)=="Low spire" &&
+              library->currentItem()->data(1,Qt::DisplayRole).toInt()==2 && scene->count()==5,
+              "Reopening lost the applied library, object IDs, or reference counts");
+        check(window.close(),"Reopened library project did not close");
+    }
+    std::cout<<"Assets panel import, placement, assignment, GPU replacement, undo/redo, Play, removal and reopen passed\n";
 }
 void exercise(const QString& path, bool create) {
     const std::filesystem::path file(path.toStdWString());
@@ -322,5 +407,6 @@ int main(int argc, char** argv) {
         check(QFile::copy(QString::fromUtf8(PLATZ_VALIDATION_PATH), copy), "Cannot copy permanent validation project");
         exercise(copy, false);
         exerciseImport(temp);
+        exerciseAssetLibrary(temp);
     } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }

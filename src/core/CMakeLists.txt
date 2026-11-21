@@ -12,6 +12,8 @@ endif()
 if(BUILD_TESTING)
     add_executable(platz_core_tests ../../tests/core/ProjectTests.cpp)
     target_link_libraries(platz_core_tests PRIVATE platz_core)
-    target_compile_definitions(platz_core_tests PRIVATE PLATZ_TEST_MESH="${PROJECT_SOURCE_DIR}/tests/assets/Oblique spire.glb")
+    target_compile_definitions(platz_core_tests PRIVATE
+        PLATZ_TEST_MESH="${PROJECT_SOURCE_DIR}/tests/assets/Oblique spire.glb"
+        PLATZ_TEST_REPLACEMENT="${PROJECT_SOURCE_DIR}/tests/assets/Low spire.glb")
     add_test(NAME core-project COMMAND platz_core_tests)
 endif()

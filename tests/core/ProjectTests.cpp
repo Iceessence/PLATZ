@@ -253,12 +253,87 @@ void suite(const fs::path& executable) {
     rejects([&]{auto corrupt=Project::open(meshFiles.source);corrupt.restorePrevious();});
     pass("GLB bounds, immutable shared geometry, atomic mesh recovery and corrupt-blob rejection");
 }
+
+void assetLibrarySuite() {
+    Fixture assets;
+    auto catalog=Project::create(assets.source,"Asset library checks");
+    auto originalDigest=catalog.importMeshAsset(PLATZ_TEST_MESH,catalog.revision());
+    const auto registered=catalog.revision();
+    expect(catalog.importMeshAsset(PLATZ_TEST_MESH,registered)==originalDigest &&
+           catalog.revision()==registered,"Importing matching bytes created another undo step.");
+    catalog.save();
+    auto current=Project::open(assets.source);
+    expect(current.meshLibrary()==catalog.meshLibrary() && current.objects()==catalog.objects(),
+           "Unused assets or objects changed on reopen.");
+    auto instance=current.instantiateMesh(originalDigest,current.revision());
+    const auto beforeAssignment=current.objects().at(3);
+    rejects([&]{current.assignMesh(beforeAssignment.id,originalDigest,current.revision()-1);});
+    current.assignMesh(beforeAssignment.id,originalDigest,current.revision());
+    auto expected=beforeAssignment;
+    expected.mesh=Mesh::Imported;
+    expected.asset=current.meshLibrary().at(originalDigest).asset;
+    expect(*current.find(expected.id)==expected,"Assignment changed the object identity or its properties.");
+    rejects([&]{current.removeMeshAsset(originalDigest,current.revision());});
+    const auto beforeReplacement=current.objects();
+    Runtime running(current);
+    const auto replacement=current.replaceMeshInstances(originalDigest,PLATZ_TEST_REPLACEMENT,current.revision());
+    const auto afterReplacement=current.objects();
+    expect(replacement!=originalDigest && current.meshLibrary().size()==2 && running.objects()==beforeReplacement,
+           "Bulk replacement dropped the original source or changed Play data.");
+    expect(current.find(instance)->asset.data->digest()==replacement &&
+           current.find(expected.id)->asset.data==current.find(instance)->asset.data,
+           "Bulk replacement missed an instance.");
+    current.undo(); expect(current.objects()==beforeReplacement && current.meshLibrary().size()==1,
+                           "Bulk replacement did not undo the whole edit.");
+    current.redo(); expect(current.objects()==afterReplacement && current.meshLibrary().size()==2,
+                           "Bulk replacement redo lost instance identity.");
+    current.save();
+    current.removeMeshAsset(originalDigest,current.revision());
+    current.save();
+    auto savedCatalog=Project::open(assets.source);
+    expect(savedCatalog.meshLibrary().size()==1 && savedCatalog.objects()==afterReplacement,
+           "Removal of an unused source did not persist independently of its objects.");
+    savedCatalog.restorePrevious();
+    expect(savedCatalog.meshLibrary().contains(originalDigest) && savedCatalog.objects()==afterReplacement,
+           "Previous revision lost an unused asset that it still owns.");
+    auto stale=Project::open(assets.source);
+    alter(assets.source,"UPDATE mesh_library SET name='External rename' WHERE rev=(SELECT head FROM project)");
+    stale.importMeshAsset(PLATZ_TEST_MESH,stale.revision());
+    rejects([&]{stale.save();});
+    expect(Project::open(assets.source).meshLibrary().at(replacement).name=="External rename",
+           "A stale library save overwrote an external edit.");
+    pass("persistent asset catalog, assignment, atomic bulk replacement, undo and revision recovery");
+
+    Fixture migration;
+    auto legacy=Project::create(migration.source,"Legacy v3 library");
+    const auto legacyId=legacy.importMesh(PLATZ_TEST_MESH,legacy.revision());
+    legacy.save();
+    alter(migration.source,"DROP TABLE mesh_library; PRAGMA user_version=3");
+    auto migrated=Project::open(migration.source);
+    expect(migrated.find(legacyId) && migrated.meshLibrary().contains(originalDigest),
+           "Legacy project failed to discover its referenced mesh.");
+    migrated.importMeshAsset(PLATZ_TEST_REPLACEMENT,migrated.revision());
+    migrated.save();
+    auto reopened=Project::open(migration.source);
+    expect(reopened.meshLibrary()==migrated.meshLibrary() && reopened.objects()==legacy.objects(),
+           "v3 migration changed object identities, references, or the new library.");
+    reopened.restorePrevious();
+    expect(reopened.meshLibrary()==legacy.meshLibrary() && reopened.objects()==legacy.objects(),
+           "v3 migration lost the previous saved library.");
+    pass("legacy v3 mesh paths migrate without changing objects or prior revisions");
+}
 }
 
 int main(int argc, char** argv) {
     try {
         if(argc==3 && std::string(argv[1])=="--interrupt-assets")
-            alter(argv[2],"BEGIN IMMEDIATE; DELETE FROM assets; UPDATE project SET head=777",true);
+            alter(argv[2],"BEGIN IMMEDIATE; DELETE FROM mesh_library; DELETE FROM assets; UPDATE project SET head=777",true);
+        if(argc==3 && std::string(argv[1])=="--extend-validation-library") {
+            auto scene=Project::open(argv[2]);
+            scene.importMeshAsset(PLATZ_TEST_REPLACEMENT,scene.revision());
+            scene.save();
+            return 0;
+        }
         if(argc==3 && std::string(argv[1])=="--extend-validation-mesh") {
             auto p=Project::open(argv[2]);
             for(const auto& o:p.objects()) if(o.asset.data) throw std::runtime_error("Validation mesh already present.");
@@ -271,6 +346,7 @@ int main(int argc, char** argv) {
             alter(argv[2],"PRAGMA synchronous=FULL; BEGIN IMMEDIATE; UPDATE objects SET name='interrupted'; UPDATE project SET head=777",true);
         }
         suite(std::filesystem::absolute(argv[0]));
+        assetLibrarySuite();
         std::cout<<passed<<" Core scenarios passed.\n";
         return 0;
     } catch (const std::exception& e) {
