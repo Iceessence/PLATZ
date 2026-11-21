@@ -11,7 +11,9 @@ Use New project in the hub to create an ordinary editable .platz file. Select an
 
 The **Assets** dock lists embedded GLB meshes and their instance counts. Use **Import…** to keep a source in the library, **Add instance** to place it, or **Assign to selection** to change the geometry of the selected object while preserving its identity, placement, and color. In the validation project you can select **Low spire** in Assets and assign it to **Oblique spire** in the Scene panel. The **Manage** menu can replace every instance from a different GLB, save the original GLB, or remove a mesh with zero uses. These project changes support Undo and Redo.
 
-Use **Add object → Import mesh from GLB…** to import and place in one step. The importer accepts one static indexed triangle primitive with an embedded buffer, up to 2 MiB per file and 8 MiB of unique sources across the project library. Saving embeds the exact source bytes and keeps the .platz project portable. The current build opens older projects and upgrades asset libraries to schema v4 when saving changes.
+Use **Add object → Import mesh from GLB…** to import and place in one step. The importer accepts one static mesh with up to 32 indexed triangle primitives and an embedded buffer, up to 2 MiB per file and 8 MiB of unique sources across the project library. Saving embeds the exact source bytes and keeps the .platz project portable. The current build opens older projects and upgrades asset projects to schema v5 when saving changes.
+
+Select **Color study** in the validation project. Under **Material** in the Inspector, choose **Copper** or **Lagoon** and edit the sRGB hex value or use the swatch to pick a color. Parts that share a GLB material share a slot. A slot edit applies to the selected object. **Reset** restores the imported color, and Undo restores the previous edit. The importer reads RGB base-color factors. The preview renders opaque colors.
 
 ## Build and verify
 On Windows x64 with VS 2026 Desktop development with C++, Windows SDK 10.0.26100, VS CMake tools, Python 3.9+ with the py launcher, Windows tar and curl:

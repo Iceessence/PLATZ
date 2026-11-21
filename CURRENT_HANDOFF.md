@@ -1,37 +1,37 @@
 # Current handoff and verification ledger
 
-Windows x64 Release development candidate. Tested software commit **3726270584da795a51a93a9ea8b9c881af683493**. The documentation commit following it records this receipt. Build and launch instructions live in START_HERE.md.
+Windows x64 Release development candidate. Tested software commit **3735df05e2a2481e0e3c6f8aead9c5fe8736649b**. The documentation commit following it records this receipt. Build and launch instructions live in START_HERE.md.
 
 ## Authority and history
 
-The permanent product specification is docs/authority/PLATZ_MASTER_ENGINE_FIRST_V4.md. Its developer directive and Vulkan steering live alongside it. ADR-001 records the Vulkan, Studio, and project architecture. f1bbbb4 preserves the interrupted D3D12 work. 9d8d4a8 contains the Vulkan Studio foundation. fc5a8bd added linear repeat, viewport resize recovery, and a process restart check. 978d816 fixed transform editor clipping. 8500577 added GLB import, persistence, and original-source extraction. The previous receipt is preserved at a840cef. Independent release acceptance remains pending.
+The permanent product specification is docs/authority/PLATZ_MASTER_ENGINE_FIRST_V4.md. Its developer directive and Vulkan steering live alongside it. ADR-001 records the Vulkan, Studio, and project architecture. Earlier tested receipts are preserved in Git. The previous mesh library release was tested at 3726270 and documented at bfa19c9. Independent release acceptance remains pending.
 
 ## Active implementation
 
-The Studio **Assets** dock lists project meshes and live instance counts. Import can retain a mesh without placing it. Add instance reuses an existing source. Assign to selection changes one object's geometry while preserving its ID, name, transform, and color. Manage can replace all instances from a GLB in one undoable step, save the original bytes, or remove an asset with no instances. Bulk replacement retains the old mesh in the library for reuse. During Play the dock can be browsed and its authoring commands are disabled.
+The GLB importer supports one static mesh with up to 32 indexed triangle primitives. Aggregate limits are 65,536 vertices and 196,608 indices. The importer reads one embedded buffer, float positions, optional float normals, and linear RGB base-color factors. It converts factors to sRGB for the existing renderer. Shared source materials share slots. Each Vulkan draw uses its primitive's index range and resolved material color. Draws for the same instance share its transformation matrices and object picking token. Node transforms, UV texture sampling, alpha blending, other PBR properties, animations, and compressed geometry remain outside this slice. GLB size limits remain 2 MiB per file and 8 MiB across the library.
 
-Core schema v4 records the catalog for each retained revision, including unreferenced assets. Undo/redo and Restore previous saved revision cover the scene and library together. The transaction writes catalog membership, SHA-256 blobs, and the scene head. Pruning retains all assets needed by either saved revision. Open supports schema v1–v4. Asset projects migrate to v4 when saved with changes. v3 migration uses the first referencing object's name for the initial catalog label. Source bytes stay immutable and deduplicated by hash. The renderer uploads meshes with active instances. The existing typed project edit boundary now checks that mesh references belong to the project.
+The Inspector exposes a material selector, color swatch, sRGB hex input, and Reset. Edits apply to one object instance. Duplicate and Repeat copy those edits and preserve subsequent independence. Reassigning a different mesh clears the original material overrides. Undo restores the earlier mesh and colors together. The Assets library continues to track usage per scene object.
 
-The current GLB subset is one static indexed triangle primitive with an embedded BIN buffer, float positions, and optional float normals. Limits are 2 MiB per source, 8 MiB across the library, and 512 entries and 512 scene objects. Geometry uses mesh-local coordinates and PLATZ placement and base color. Node transforms, imported materials, textures, animations, and compressed geometry remain outside this slice.
+Schema v5 persists per-object slot overrides in the same transaction as the library, scene, and revision head. Both retained revisions keep their overrides. Existing v3/v4 flat-colored imported objects preserve the saved appearance through migration. PLATZ still reads v1–v5 projects. Asset projects adopt v5 on the first saved change. Slot changes pass through the validated, revision-bound typed edit boundary used for future AI integration.
 
 ## Verified on the development workstation
 
-Windows 11 Pro build 26300, i9-14900K, RTX 5080 driver 617.42, Vulkan device 1.4.351, system loader 1.4.341, C++20 with MSVC 19.51.36260, Qt 6.12.0, SDL 3.4.20, SDK 1.4.363.1, VMA 3.5.0, and Slang 2026.22.1. Release executable SHA-256 **51C937AA171B75BC0BB8FD7A9B7312DC7BED17F3132B9A433ABCEC9C162D1B00**.
+Windows 11 Pro build 26300, i9-14900K, RTX 5080 driver 617.42, Vulkan device 1.4.351, system loader 1.4.341, C++20 with MSVC 19.51.36260, Qt 6.12.0, SDL 3.4.20, SDK 1.4.363.1, VMA 3.5.0, and Slang 2026.22.1. Release executable SHA-256 **2B37AC716D8A699D3F7C1032376D5E0B43E635BF54FD0B1B3BCEF23AAB806DA9**.
 
-A clean Release build passed all seven CTest suites. The suite launched and closed the current Windows executable twice. Verbose evidence is in build/asset-delivery-tests.log.
+A clean Release build passed all seven CTest suites. The suite launched and closed the current Windows executable twice. Verbose evidence is in build/material-delivery-tests.log.
 
 | Test | Observed result |
 |---|---|
-| core-project | 17 scenarios. Library-only assets survive reopen. Assignment preserves identity and properties. Bulk replacement, Undo/Redo, and previous revision restore include the catalog. Stale saves and removal of referenced assets are rejected. v3 mesh identities and prior revision survive migration. Existing interrupted-save and atomic asset recovery checks passed. |
-| shader_toolchain | Deterministic Slang output and validated SPIR-V, material layout reflection, includes, failure preservation, and shader diagnostics. |
-| hardware_frame_readback | Vulkan depth/color/ID readback, picking, resize/restore, atlas upload, retirement, and re-upload. Synchronization validation reported zero errors. |
-| hardware_gpu_assisted | Same hardware checks under GPU-assisted validation. Zero errors. Existing driver loader overlay warnings remain. |
-| validation_scene_profile | Five placed objects and two library assets at 1280×720, 1×, SDR, hidden FIFO surface, 16 warm-up and 96 measured frames, validation off. CPU submit/present p50/p95 0.1566/8.4465 ms. GPU p50/p95 0.0196/0.0201 ms. |
-| studio_edit_play_reopen | Real Studio library import, placement, assignment, replacing two instances with changed GPU pixels, undo/redo, Play and Stop, unused removal, and reopen with matching objects and use counts. Baseline GLB, authoring, and project checks also passed. |
-| studio_process_restart | Actual PLATZ.exe save, normal shutdown, and restart with the same object ID and edited name. Permanent validation project bytes were preserved during the tests. |
+| core-project | 19 scenarios. GLB index rebasing, shared slot IDs, sRGB conversion, invalid/stale edit rejection, per-instance overrides, undo/redo, save and recovery. v4 flat-color appearance and prior revision survived migration to v5. Baseline transaction and asset tests passed. |
+| shader_toolchain | Deterministic Slang output and validated SPIR-V, material layout reflection, includes, and shader diagnostics. |
+| hardware_frame_readback | Multiple indexed draws under one picking token. Shared Copper slot recolored two separated surfaces and left Lagoon pixels untouched. Synchronization validation reported zero errors. Existing resize and geometry lifetime coverage passed. |
+| hardware_gpu_assisted | Same hardware checks under GPU-assisted validation. Zero errors. Existing loader overlay warnings remain. |
+| validation_scene_profile | Six placed objects at 1280×720, 1×, SDR, hidden FIFO surface, 16 warm-up and 96 measured frames, validation off. CPU submit/present p50/p95 0.1492/8.4192 ms. GPU p50/p95 0.0199/0.0202 ms. |
+| studio_edit_play_reopen | Inspector slot switching, color edits, reset/Undo, Play and Stop, and pixel-identical reopen. Library, GLB and scene authoring regressions passed. |
+| studio_process_restart | Actual PLATZ.exe save, normal shutdown, restart, and stable-ID recovery. Permanent validation project bytes remained intact throughout the tests. |
 
-The permanent validation project is projects/PLATZ Validation.platz at revision 8. The five placed objects retain their IDs. **Oblique spire** has one use and **Low spire** has zero. Validation project SHA-256 is **333249DEFD12D24B4A6D3DE930CCD0657654D918FF863428F01D892F2FA1398B**.
+The permanent validation project is projects/PLATZ Validation.platz at revision 10. Its prior five scene IDs were retained. **Color study** adds one scene object with three primitives and two slots, **Copper** and **Lagoon**. SHA-256 is **84A868F683C8FD6E68746BCC234EAA9FE2C253AF6FA09AEE947101BAC8367D8C**.
 
 ## Continuation
 
-Extend the mesh pipeline to support a static GLB with multiple primitives and editable material slots. Add project-level coverage for slot assignment, rendering, persistence, and undo. Qualify durable ordering, integrity, and reclamation across the database and blob store before using external bundles for larger assets. Typed revision-bound edits remain the PLATZ AI authority boundary. Model training and inference remain future work. Device loss/OOM stress, sustained large scenes, PBR/textures, ray tracing, other OSes, general scripting, accessibility breadth, and GPU contention with ML remain unqualified.
+Extend material slots with base-color textures. Qualify UV0 mapping, bounded image decoding, sRGB texture sampling, asset lifetime, and project persistence. Qualify durable ordering, integrity, and reclamation before using external bundles for larger assets. Typed revision-bound edits remain the PLATZ AI authority boundary. Model training and inference remain future work. Device loss/OOM stress, sustained large scenes, full PBR, ray tracing, other OSes, general scripting, accessibility breadth, and GPU contention with ML remain unqualified.
