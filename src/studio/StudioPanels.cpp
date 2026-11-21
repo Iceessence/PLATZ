@@ -2,6 +2,7 @@
 #include "Appearance.hpp"
 #include "Viewport.hpp"
 #include <QColorDialog>
+#include <QCheckBox>
 #include <QComboBox>
 #include <QDialogButtonBox>
 #include <QFormLayout>
@@ -287,6 +288,18 @@ void StudioWindow::buildInspector() {
     connect(resetSlot_,&QPushButton::clicked,this,[this]{
         const auto slot=materialSlot_->currentIndex();
         if (slot>=0) applyEdit([slot](platz::Object& o){o.setSlotColor(slot,std::nullopt);});
+    });
+    useTexture_=new QCheckBox(tr("Use imported texture"));
+    useTexture_->setObjectName("useBaseColorTexture");
+    useTexture_->setToolTip(tr("Use the embedded base-color texture for this material slot."));
+    box->addWidget(useTexture_);
+    textureInfo_=label({},"minor");
+    textureInfo_->setObjectName("baseColorTextureInfo");
+    textureInfo_->setWordWrap(true);
+    box->addWidget(textureInfo_);
+    connect(useTexture_,&QCheckBox::toggled,this,[this](bool enabled){
+        const auto slot=materialSlot_->currentIndex();
+        if (slot>=0) applyEdit([slot,enabled](platz::Object& object){object.setTextureEnabled(slot,enabled);});
     });
     box->addWidget(label(tr("Base color  ·  sRGB"),"minor"));
     auto* material = new QHBoxLayout;

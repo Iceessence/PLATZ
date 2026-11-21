@@ -21,6 +21,7 @@ struct DrawObject {
     Vec3 color{0.65f, 0.65f, 0.65f}; // sRGB
     std::shared_ptr<const platz::MeshAsset> asset{};
     std::vector<platz::SlotColor> slotColors;
+    std::vector<std::uint32_t> texturesOff;
 };
 
 struct Camera {
@@ -55,6 +56,7 @@ class Renderer {
     const std::string& adapter() const;
     std::string diagnostics() const;
     unsigned validationErrors() const;
+    unsigned textureWarnings() const;
     double lastCpuMilliseconds() const;
     double lastGpuMilliseconds() const; // Zero until a timestamped frame completes.
   private:

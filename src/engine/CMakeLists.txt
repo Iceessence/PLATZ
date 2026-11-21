@@ -27,7 +27,7 @@ target_include_directories(platz_engine PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_include_directories(platz_engine PRIVATE ${CMAKE_CURRENT_BINARY_DIR}
     "${PLATZ_SDK}/Include" "${PLATZ_GRAPHICS}/vma/VulkanMemoryAllocator-3.5.0/include")
 target_compile_definitions(platz_engine PRIVATE VK_USE_PLATFORM_WIN32_KHR)
-target_link_libraries(platz_engine PRIVATE "${PLATZ_SDK}/Lib/vulkan-1.lib" platz_sdl3)
+target_link_libraries(platz_engine PRIVATE "${PLATZ_SDK}/Lib/vulkan-1.lib" platz_sdl3 platz_assets)
 
 if(BUILD_TESTING)
     add_test(NAME shader_toolchain COMMAND "${Python3_EXECUTABLE}"

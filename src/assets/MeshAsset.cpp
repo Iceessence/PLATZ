@@ -55,15 +55,58 @@ void checkJson(std::span<const std::uint8_t> json) {
     }
     require(!quoted && !depth, "Incomplete GLB metadata.");
 }
-void checkAccessor(const cgltf_accessor& a, size_t bytes, size_t alignment, size_t maxCount) {
+void checkAccessor(const cgltf_accessor& a, size_t bytes, size_t alignment, size_t maxCount,
+                   bool normalized = false) {
     auto* v = a.buffer_view;
-    require(v && !a.is_sparse && !a.normalized && !v->has_meshopt_compression && a.count &&
+    require(v && !a.is_sparse && a.normalized == normalized && !v->has_meshopt_compression && a.count &&
                 a.count <= maxCount && a.stride >= bytes && a.stride <= 252 && a.stride % alignment == 0 &&
                 a.offset <= v->size && (v->offset % alignment + a.offset % alignment) % alignment == 0 &&
                 bytes <= v->size - a.offset && a.count - 1 <= (v->size - a.offset - bytes) / a.stride,
             "Unsupported or out-of-bounds GLB accessor.");
 }
-MeshMaterialSlot readSlot(const cgltf_material* material) {
+TextureWrap addressMode(cgltf_wrap_mode mode) {
+    if (mode == cgltf_wrap_mode_clamp_to_edge)
+        return TextureWrap::Clamp;
+    if (mode == cgltf_wrap_mode_mirrored_repeat)
+        return TextureWrap::Mirror;
+    return TextureWrap::Repeat;
+}
+TextureFilter filterMode(cgltf_filter_type mode) {
+    if (mode == cgltf_filter_type_nearest || mode == cgltf_filter_type_nearest_mipmap_nearest ||
+        mode == cgltf_filter_type_nearest_mipmap_linear)
+        return TextureFilter::Nearest;
+    return TextureFilter::Linear;
+}
+BaseColorTexture readTexture(const cgltf_texture_view& view, std::span<const std::uint8_t> source,
+                             size_t binaryOffset) {
+    require(view.texcoord == 0 && !view.has_transform,
+            "This texture requires an unsupported UV set or transform.");
+    const auto* image = view.texture->image;
+    require(image && image->buffer_view && !image->uri && image->mime_type &&
+                !image->buffer_view->has_meshopt_compression,
+            "Use an embedded PNG or JPEG for the base-color texture.");
+    BaseColorTexture texture;
+    const auto mime = std::string_view(image->mime_type);
+    require(mime == "image/png" || mime == "image/jpeg",
+            "Only embedded PNG and JPEG textures are supported.");
+    texture.encoding = mime == "image/png" ? TextureEncoding::Png : TextureEncoding::Jpeg;
+    texture.offset = binaryOffset + image->buffer_view->offset;
+    texture.length = image->buffer_view->size;
+    require(texture.offset <= source.size() && texture.length <= source.size() - texture.offset,
+            "Embedded texture is outside the GLB buffer.");
+    const auto size = inspectTexture(source.subspan(texture.offset, texture.length), texture.encoding);
+    texture.width = size[0];
+    texture.height = size[1];
+    if (const auto* sampler = view.texture->sampler) {
+        texture.wrapU = addressMode(sampler->wrap_s);
+        texture.wrapV = addressMode(sampler->wrap_t);
+        texture.min = filterMode(sampler->min_filter);
+        texture.mag = filterMode(sampler->mag_filter);
+    }
+    return texture;
+}
+MeshMaterialSlot readSlot(const cgltf_material* material, std::span<const std::uint8_t> source,
+                          size_t binaryOffset) {
     MeshMaterialSlot slot;
     if (!material)
         return slot;
@@ -83,10 +126,39 @@ MeshMaterialSlot readSlot(const cgltf_material* material) {
                              ? 12.92f * linear
                              : std::clamp(1.055f * std::pow(linear, 1.f / 2.4f) - 0.055f, 0.f, 1.f);
     }
+    const auto& texture = material->pbr_metallic_roughness.base_color_texture;
+    if (texture.texture) {
+        try {
+            slot.texture = readTexture(texture, source, binaryOffset);
+        } catch (const std::runtime_error& error) {
+            slot.textureNote = error.what();
+        }
+    }
     return slot;
 }
 
-void appendPrimitive(const cgltf_primitive& primitive, std::vector<MeshVertex>& vertices,
+bool readUv(const cgltf_accessor* uv, std::span<MeshVertex> vertices) {
+    if (!uv || uv->type != cgltf_type_vec2 || uv->count != vertices.size())
+        return false;
+    const auto type = uv->component_type;
+    if (type != cgltf_component_type_r_32f && type != cgltf_component_type_r_8u &&
+        type != cgltf_component_type_r_16u)
+        return false;
+    const auto size = cgltf_component_size(type);
+    try {
+        checkAccessor(*uv, 2 * size, size, vertices.size(), type != cgltf_component_type_r_32f);
+    } catch (const std::runtime_error&) {
+        return false;
+    }
+    for (size_t i = 0; i < vertices.size(); ++i) {
+        auto& point = vertices[i].uv;
+        if (!cgltf_accessor_read_float(uv, i, point.data(), 2) || !std::isfinite(point[0]) ||
+            !std::isfinite(point[1]) || std::abs(point[0]) > 100000 || std::abs(point[1]) > 100000)
+            return false;
+    }
+    return true;
+}
+bool appendPrimitive(const cgltf_primitive& primitive, std::vector<MeshVertex>& vertices,
                      std::vector<std::uint32_t>& indices) {
     require(primitive.type == cgltf_primitive_type_triangles && primitive.indices &&
                 !primitive.targets_count && !primitive.has_draco_mesh_compression,
@@ -152,8 +224,26 @@ void appendPrimitive(const cgltf_primitive& primitive, std::vector<MeshVertex>& 
         else
             v.normal = {0, 1, 0};
     }
+    auto current = std::span(vertices).subspan(base);
+    const auto hasUv = readUv(cgltf_find_accessor(&primitive, cgltf_attribute_type_texcoord, 0), current);
+    if (!hasUv)
+        for (auto& vertex : current)
+            vertex.uv = {};
+    return hasUv;
 }
 } // namespace
+const BaseColorTexture* MeshAsset::textureForSlot(std::uint32_t slot,
+                                                  std::span<const std::uint32_t> disabled) const {
+    const auto& texture = slots_.at(slot).texture;
+    if (!texture || std::find(disabled.begin(), disabled.end(), slot) != disabled.end())
+        return nullptr;
+    return &*texture;
+}
+void MeshAsset::readTexturePixels(const BaseColorTexture& texture, std::span<std::uint8_t> rgba) const {
+    if (texture.offset > source_.size() || texture.length > source_.size() - texture.offset)
+        throw std::runtime_error("Invalid texture byte range.");
+    decodeTexture(std::span(source_).subspan(texture.offset, texture.length), texture, rgba);
+}
 std::shared_ptr<const MeshAsset> MeshAsset::load(const std::filesystem::path& file) {
     require(std::filesystem::is_regular_file(file), "Select a local GLB file.");
     std::ifstream stream(file, std::ios::binary | std::ios::ate);
@@ -216,11 +306,22 @@ std::shared_ptr<const MeshAsset> MeshAsset::decode(std::span<const std::uint8_t>
         auto [slot, inserted] =
             slots.try_emplace(primitive.material, static_cast<std::uint32_t>(slots.size()));
         if (inserted)
-            asset->slots_.push_back(readSlot(primitive.material));
+            asset->slots_.push_back(readSlot(primitive.material, source, binHeader + 8));
         const auto firstIndex = static_cast<std::uint32_t>(asset->indices_.size());
-        appendPrimitive(primitive, asset->vertices_, asset->indices_);
-        asset->primitives_.push_back(
-            {firstIndex, static_cast<std::uint32_t>(asset->indices_.size()) - firstIndex, slot->second});
+        const bool hasUv = appendPrimitive(primitive, asset->vertices_, asset->indices_);
+        asset->primitives_.push_back({firstIndex,
+                                      static_cast<std::uint32_t>(asset->indices_.size()) - firstIndex,
+                                      slot->second, hasUv});
+    }
+    for (std::uint32_t i = 0; i < asset->slots_.size(); ++i) {
+        auto& slot = asset->slots_[i];
+        const bool mapped = std::any_of(
+            asset->primitives_.begin(), asset->primitives_.end(),
+            [i](const MeshPrimitive& primitive) { return primitive.slot == i && primitive.hasUv; });
+        if (slot.texture && !mapped) {
+            slot.texture.reset();
+            slot.textureNote = "No usable TEXCOORD_0 mapping on this slot.";
+        }
     }
     asset->min_ = asset->max_ = asset->vertices_.front().position;
     for (const auto& v : asset->vertices_) {

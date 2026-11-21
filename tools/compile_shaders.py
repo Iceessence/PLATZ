@@ -20,14 +20,27 @@ def compile_stage(source, compiler, validator, work, entry, stage):
     return binary.read_bytes(), json.loads(reflection.read_bytes())
 
 def layout(reflection):
-    params = reflection["parameters"]
-    if len(params) != 1 or params[0]["name"] != "Scene" or params[0]["type"]["kind"] != "constantBuffer":
+    scene = next((p for p in reflection["parameters"] if p["name"] == "Scene"), None)
+    if scene is None or scene["type"]["kind"] != "constantBuffer":
         raise ValueError("Renderer expects one Scene constant buffer")
-    scene = params[0]
     desc = scene["binding"]
     block = scene["type"]["elementType"]
     return (desc.get("space", 0), desc["index"], block["sizes"][0]["value"],
             {f["name"]: f["binding"]["offset"] for f in block["fields"]})
+
+def texture_layout(reflection):
+    resources = {p["name"]: p for p in reflection["parameters"]}
+    if set(resources) != {"Scene", "colorTexture", "colorSampler"}:
+        raise ValueError("Renderer expects one base-color texture and sampler")
+    image = resources["colorTexture"]
+    sampler = resources["colorSampler"]
+    if image["type"].get("baseShape") != "texture2D" or sampler["type"]["kind"] != "samplerState":
+        raise ValueError("Unexpected material image or sampler type")
+    image_binding, sampler_binding = image["binding"], sampler["binding"]
+    group = image_binding.get("space", 0)
+    if group != sampler_binding.get("space", 0) or image_binding["index"] == sampler_binding["index"]:
+        raise ValueError("Material image and sampler must share a set with distinct bindings")
+    return (group, image_binding["index"], sampler_binding["index"])
 
 def words(name, data):
     values = [f"0x{value:08x}u" for (value,) in struct.iter_unpack("<I", data)]
@@ -43,8 +56,10 @@ def build(source, output, compiler, validator):
         if layout(vr) != layout(fr):
             raise ValueError("Vertex and fragment parameter layouts disagree")
         group, binding, size, offsets = layout(vr)
+        texture_set, image_binding, sampler_binding = texture_layout(fr)
         header = ["#pragma once", "#include <cstdint>", "namespace platz::engine::shaders {",
             f"inline constexpr unsigned sceneSet={group}, sceneBinding={binding}, sceneSize={size};",
+            f"inline constexpr unsigned textureSet={texture_set}, imageBinding={image_binding}, samplerBinding={sampler_binding};",
             "namespace offset {"]
         for field, offset in offsets.items():
             header.append(f"inline constexpr unsigned {field}={offset};")

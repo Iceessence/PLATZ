@@ -34,6 +34,7 @@ private:
     std::uint32_t selection_ = 0;
     QSize surface_;
     QPointF mouse_;
+    QString backendText_;
     bool failed_ = false;
     void fail(const std::exception& error);
 };

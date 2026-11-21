@@ -6,6 +6,7 @@
 #include <optional>
 
 class QAction;
+class QCheckBox;
 class QCloseEvent;
 class QComboBox;
 class QDockWidget;
@@ -38,6 +39,8 @@ private:
     QListWidget* tree_{};
     QLineEdit *name_{}, *color_{};
     QComboBox* materialSlot_{};
+    QCheckBox* useTexture_{};
+    QLabel* textureInfo_{};
     QPushButton* resetSlot_{};
     std::string materialOwner_;
     std::array<QDoubleSpinBox*,9> axis_{};

@@ -40,7 +40,7 @@ void profile(const std::filesystem::path& file) {
         case platz::Mesh::Imported: mesh = Mesh::Imported; break;
         }
         scene.push_back({static_cast<unsigned>(scene.size()) + 1, mesh, vector(object.position),
-            vector(object.rotation), vector(object.scale), vector(object.color),object.asset.data,object.slotColors});
+            vector(object.rotation), vector(object.scale), vector(object.color),object.asset.data,object.slotColors,object.texturesOff});
     }
     TestSurface surface;
     check(surface.handle && SetWindowPos(surface.handle,nullptr,0,0,1280,720,SWP_NOZORDER|SWP_NOACTIVATE),
@@ -183,6 +183,68 @@ void run() {
     check(changesOnLeft>100 && changesOnRight>100 && untouchedMeshPixels>100,
           "Both Copper primitives and the untouched Lagoon primitive were not rendered.");
     std::cout<<"Shared material slot recolored separated primitives without changing the Lagoon slot or object IDs\n";
+
+    mesh.asset=platz::MeshAsset::load(PLATZ_TEST_TEXTURE);
+    mesh.slotColors.clear();
+    meshCamera.pitch=0;
+    meshCamera.frameObject(mesh,376.f/250.f);
+    gpu.draw(std::span(&mesh,1),meshCamera);
+    const auto textured=gpu.capture();
+    std::size_t topRed=0, bottomBlue=0, jpegBlue=0, jpegWhite=0;
+    for (size_t i=0;i<textured.tokens.size();++i) {
+        if (textured.tokens[i]!=mesh.token) continue;
+        const auto* rgb=&textured.rgba[4*i];
+        const auto x=i%textured.width, y=i/textured.width;
+        if (x<textured.width/2) {
+            if (y<textured.height/2 && rgb[0]>rgb[1]+80 && rgb[0]>rgb[2]+80) ++topRed;
+            if (y>=textured.height/2 && rgb[2]>rgb[1]+60 && rgb[2]>rgb[0]+80) ++bottomBlue;
+        } else {
+            if (rgb[2]>rgb[1]+65 && rgb[2]>rgb[0]+85) ++jpegBlue;
+            if (rgb[0]>160 && rgb[1]>160 && rgb[2]>160) ++jpegWhite;
+        }
+    }
+    check(topRed>100 && bottomBlue>100 && jpegBlue>100 && jpegWhite>100 && gpu.textureWarnings()==0,
+          "Embedded PNG orientation, normalized UVs or JPEG colors were not rendered.");
+    mesh.texturesOff={0};
+    mesh.slotColors={{0,{240.f/255,32.f/255,28.f/255}}};
+    gpu.draw(std::span(&mesh,1),meshCamera);
+    const auto flatRed=gpu.capture();
+    check(flatRed.tokens==textured.tokens && flatRed.rgba!=textured.rgba,"Texture toggle disturbed object IDs.");
+    std::size_t matchingReds=0;
+    for (size_t i=0;i<textured.tokens.size();++i) {
+        const auto* rgb=&textured.rgba[4*i];
+        const auto* flat=&flatRed.rgba[4*i];
+        if (i%textured.width>=textured.width/2)
+            check(std::equal(rgb,rgb+4,flat),"Disabling one texture changed the JPEG slot.");
+        else if (textured.tokens[i]==mesh.token && rgb[0]>rgb[1]+80 && rgb[0]>rgb[2]+80 &&
+                 std::abs(rgb[0]-flat[0])<=2 && std::abs(rgb[1]-flat[1])<=2 && std::abs(rgb[2]-flat[2])<=2)
+            ++matchingReds;
+    }
+    check(matchingReds>100,"sRGB texture sampling differs from the same flat albedo under identical lighting.");
+    mesh.texturesOff.clear();
+    mesh.slotColors.clear();
+    gpu.draw(std::span(&mesh,1),meshCamera);
+    check(gpu.capture().rgba==textured.rgba,"Re-uploading a texture changed its rendered pixels.");
+
+    mesh.texturesOff={0};
+    gpu.draw(std::span(&mesh,1),meshCamera);
+    const auto flatFallback=gpu.capture();
+    auto corrupted=mesh.asset->source();
+    const auto& png=*mesh.asset->materialSlots()[0].texture;
+    const auto section=std::span(corrupted).subspan(png.offset,png.length);
+    const std::array<std::uint8_t,4> idat{'I','D','A','T'};
+    const auto data=std::search(section.begin(),section.end(),idat.begin(),idat.end());
+    check(data!=section.end() && (section.end()-data)>10,"Fixture PNG has no IDAT payload.");
+    data[4]=0;
+    mesh.asset=platz::MeshAsset::decode(corrupted);
+    mesh.texturesOff.clear();
+    gpu.draw(std::span(&mesh,1),meshCamera);
+    const auto recovered=gpu.capture();
+    check(recovered.tokens==flatFallback.tokens && recovered.rgba==flatFallback.rgba,
+          "A corrupt raster affected the viewport or the unaffected material.");
+    if (mesh.asset->materialSlots()[0].texture)
+        check(gpu.textureWarnings()==1,"A GPU upload decode fallback was not surfaced.");
+    std::cout<<"PNG/JPEG orientation, UV0, sRGB sampling, per-slot isolation, texture re-upload and corrupt-raster fallback passed\n";
     check(gpu.validationErrors() == 0, "Vulkan reported graphics validation errors");
     std::cout << "Adapter: " << gpu.adapter() << "\n" << gpu.diagnostics() << "\n"
               << width << "x" << height << ", 3 objects, 11 draw + synchronous readbacks; median "

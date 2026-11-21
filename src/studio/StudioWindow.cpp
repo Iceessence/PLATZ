@@ -2,6 +2,7 @@
 #include "Appearance.hpp"
 #include "Viewport.hpp"
 #include <QAction>
+#include <QCheckBox>
 #include <QCloseEvent>
 #include <QComboBox>
 #include <QDockWidget>
@@ -294,6 +295,7 @@ void StudioWindow::syncInspector() {
 }
 void StudioWindow::syncMaterial(const platz::Object* object) {
     const QSignalBlocker block(materialSlot_);
+    const QSignalBlocker textureSignals(useTexture_);
     const auto* asset=object ? object->asset.data.get() : nullptr;
     const auto owner=asset ? object->id+asset->digest() : std::string{};
     materialSlot_->setVisible(asset);
@@ -310,6 +312,14 @@ void StudioWindow::syncMaterial(const platz::Object* object) {
             }
         }
     }
+    const int index=materialSlot_->currentIndex();
+    const auto* slot=asset && index>=0 ? &asset->materialSlots()[index] : nullptr;
+    const bool usesTexture=slot && asset->textureForSlot(index,object->texturesOff);
+    useTexture_->setVisible(slot && slot->texture);
+    useTexture_->setEnabled(!runtime_ && slot && slot->texture);
+    useTexture_->setChecked(usesTexture);
+    textureInfo_->setVisible(slot && slot->hasSourceTexture());
+    color_->setToolTip(usesTexture ? tr("This base color tints the texture.") : QString{});
     if (!object) {
         color_->clear();
         swatch_->setStyleSheet({});
@@ -317,12 +327,18 @@ void StudioWindow::syncMaterial(const platz::Object* object) {
         return;
     }
     auto value=std::array{object->color.x,object->color.y,object->color.z};
-    const int index=materialSlot_->currentIndex();
-    const bool hasSlot=asset && index>=0;
-    const bool overridden=hasSlot && std::any_of(object->slotColors.begin(),object->slotColors.end(),
+    const bool overridden=slot && std::any_of(object->slotColors.begin(),object->slotColors.end(),
         [index](const auto& color){return color.slot==static_cast<unsigned>(index);});
     resetSlot_->setEnabled(overridden && !runtime_);
-    if (hasSlot) value=asset->colorForSlot(index,value,object->slotColors);
+    if (slot) {
+        value=asset->colorForSlot(index,value,object->slotColors);
+        if (slot->texture) {
+            const auto format=slot->texture->encoding==platz::TextureEncoding::Png ? "PNG" : "JPEG";
+            textureInfo_->setText(tr("Embedded %1 · %2 × %3").arg(format).arg(slot->texture->width).arg(slot->texture->height));
+        } else if (slot->hasSourceTexture()) {
+            textureInfo_->setText(tr("Flat color · %1").arg(QString::fromStdString(slot->textureNote)));
+        }
+    }
     const auto hex=QColor::fromRgbF(value[0],value[1],value[2]).name().toUpper();
     color_->setText(hex);
     swatch_->setStyleSheet(QString("background-color: %1").arg(hex));

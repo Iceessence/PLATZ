@@ -29,6 +29,7 @@ XMVECTOR offset(const Camera& camera) {
 
 struct Vertex {
     XMFLOAT3 position, normal;
+    XMFLOAT2 uv;
 };
 
 struct MeshRange {
@@ -37,18 +38,20 @@ struct MeshRange {
 struct ImportedRange {
     MeshRange range;
     std::uint32_t slot;
+    bool hasUv;
 };
 struct SceneDraw {
     const DrawObject* object;
     MeshRange range;
     Vec3 color;
+    VkDescriptorSet texture;
 };
 struct Geometry {
     std::vector<Vertex> vertices;
     std::vector<std::uint32_t> indices;
     std::array<MeshRange, 4> ranges{};
-    UINT vertex(XMFLOAT3 p, XMFLOAT3 n) {
-        vertices.push_back({p, n});
+    UINT vertex(XMFLOAT3 p, XMFLOAT3 n, XMFLOAT2 uv = {}) {
+        vertices.push_back({p, n, uv});
         return static_cast<UINT>(vertices.size() - 1);
     }
     void quad(UINT a, UINT b, UINT c, UINT d) {
@@ -222,12 +225,33 @@ struct PresentImage {
     VkImage image{};
     VkSemaphore finished{};
 };
+using TextureKey = std::pair<std::string,platz::BaseColorTexture>;
+using TextureSources = std::map<TextureKey,const platz::MeshAsset*>;
+struct TextureBinding {
+    Image image;
+    VkSampler sampler{};
+    VkDescriptorSet set{};
+};
+struct TextureBatch {
+    VkDevice device{};
+    VkDescriptorPool pool{};
+    TextureBinding white;
+    std::map<TextureKey,TextureBinding> entries;
+    unsigned warnings{};
+    ~TextureBatch() {
+        if (pool) vkDestroyDescriptorPool(device,pool,nullptr);
+        if (white.sampler) vkDestroySampler(device,white.sampler,nullptr);
+        for (auto& [key,binding]:entries)
+            if (binding.sampler) vkDestroySampler(device,binding.sampler,nullptr);
+    }
+};
 } // namespace
 struct Renderer::Impl {
     Device d; // Outlives every buffer, image and in-flight frame.
     std::array<Frame, framesInFlight> frames;
     uint32_t current{}, last{}, frameNumber{};
     VkDescriptorSetLayout binding{};
+    VkDescriptorSetLayout textureLayout{};
     VkDescriptorPool descriptors{};
     VkPipelineLayout layout{};
     VkPipeline pipeline{}, ground{};
@@ -236,6 +260,8 @@ struct Renderer::Impl {
     VkFence transferFence{};
     Buffer geometry, readback;
     Buffer pendingGeometry, geometryStaging;
+    Buffer textureStaging;
+    std::unique_ptr<TextureBatch> textures, pendingTextures;
     VkDeviceSize indexOffset{}, stride{};
     std::array<MeshRange, 4> ranges{};
     std::map<std::string,std::vector<ImportedRange>> imported;
@@ -251,6 +277,7 @@ struct Renderer::Impl {
     void releaseSwap();
     void makePipelines();
     void upload(const std::map<std::string,const platz::MeshAsset*>& assets);
+    void uploadTextures(const TextureSources& sources);
     void finishTransfer();
     void prepare(Frame&, std::span<const SceneDraw>, const Camera&, uint32_t);
     void record(Frame&, std::span<const SceneDraw>, uint32_t);
@@ -272,9 +299,23 @@ void Renderer::Impl::open(HWND hwnd) {
     bc.bindingCount = 1;
     bc.pBindings = &uniform;
     check(vkCreateDescriptorSetLayout(d.device, &bc, nullptr, &binding), "Creating scene parameter binding");
+    static_assert(shaders::sceneSet==0 && shaders::textureSet==1);
+    VkFormatProperties textureFormat{};
+    vkGetPhysicalDeviceFormatProperties(d.physical,VK_FORMAT_R8G8B8A8_SRGB,&textureFormat);
+    constexpr VkFormatFeatureFlags required=VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
+        VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
+    if ((textureFormat.optimalTilingFeatures & required)!=required)
+        throw std::runtime_error("This Vulkan device cannot sample sRGB material textures.");
+    const std::array textureBindings{
+        VkDescriptorSetLayoutBinding{shaders::imageBinding,VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,1,VK_SHADER_STAGE_FRAGMENT_BIT},
+        VkDescriptorSetLayoutBinding{shaders::samplerBinding,VK_DESCRIPTOR_TYPE_SAMPLER,1,VK_SHADER_STAGE_FRAGMENT_BIT}};
+    bc.bindingCount=static_cast<uint32_t>(textureBindings.size());
+    bc.pBindings=textureBindings.data();
+    check(vkCreateDescriptorSetLayout(d.device,&bc,nullptr,&textureLayout),"Creating material texture layout");
+    const std::array layouts{binding,textureLayout};
     VkPipelineLayoutCreateInfo lc{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
-    lc.setLayoutCount = 1;
-    lc.pSetLayouts = &binding;
+    lc.setLayoutCount = static_cast<uint32_t>(layouts.size());
+    lc.pSetLayouts = layouts.data();
     check(vkCreatePipelineLayout(d.device, &lc, nullptr, &layout), "Creating material parameter layout");
     VkDescriptorPoolSize size{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, framesInFlight};
     VkDescriptorPoolCreateInfo dc{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
@@ -331,6 +372,10 @@ Renderer::Impl::~Impl() {
         vkDestroyPipeline(d.device, ground, nullptr);
     if (layout)
         vkDestroyPipelineLayout(d.device, layout, nullptr);
+    textures.reset();
+    pendingTextures.reset();
+    if (textureLayout)
+        vkDestroyDescriptorSetLayout(d.device,textureLayout,nullptr);
     if (descriptors)
         vkDestroyDescriptorPool(d.device, descriptors, nullptr);
     if (binding)
@@ -355,9 +400,9 @@ void Renderer::Impl::upload(const std::map<std::string,const platz::MeshAsset*>&
         auto& meshRanges=newRanges[digest];
         const auto firstIndex=static_cast<UINT>(source.indices.size());
         for (const auto& primitive:asset->primitives())
-            meshRanges.push_back({{firstIndex+primitive.firstIndex,primitive.indexCount},primitive.slot});
+            meshRanges.push_back({{firstIndex+primitive.firstIndex,primitive.indexCount},primitive.slot,primitive.hasUv});
         for(const auto& v:asset->vertices()) source.vertex(
-            {v.position[0],v.position[1],v.position[2]}, {v.normal[0],v.normal[1],v.normal[2]});
+            {v.position[0],v.position[1],v.position[2]}, {v.normal[0],v.normal[1],v.normal[2]}, {v.uv[0],v.uv[1]});
         for(auto index:asset->indices()) source.indices.push_back(base+index);
     }
     const VkDeviceSize vertexBytes = source.vertices.size() * sizeof(Vertex);
@@ -396,6 +441,105 @@ void Renderer::Impl::upload(const std::map<std::string,const platz::MeshAsset*>&
     ranges=source.ranges;
     indexOffset=vertexBytes;
     imported=std::move(newRanges);
+}
+void Renderer::Impl::uploadTextures(const TextureSources& sources) {
+    VkDeviceSize bytes=4;
+    for (const auto& item:sources) bytes+=item.first.second.rgbaSize();
+    if (sources.size()>BaseColorTexture::maxActive || bytes-4>BaseColorTexture::maxActiveBytes)
+        throw std::runtime_error("Material textures exceed the viewport's texture budget.");
+    auto batch=std::make_unique<TextureBatch>();
+    batch->device=d.device;
+    const auto capacity=static_cast<uint32_t>(sources.size()+1);
+    const std::array sizes{VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,capacity},
+                           VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_SAMPLER,capacity}};
+    VkDescriptorPoolCreateInfo pool{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    pool.maxSets=capacity;
+    pool.poolSizeCount=static_cast<uint32_t>(sizes.size());
+    pool.pPoolSizes=sizes.data();
+    check(vkCreateDescriptorPool(d.device,&pool,nullptr,&batch->pool),"Creating material descriptor pool");
+    auto staging=d.buffer(bytes,VK_BUFFER_USAGE_TRANSFER_SRC_BIT,MemoryIntent::Upload,"Base-color texture upload");
+    auto pixels=std::span(static_cast<std::uint8_t*>(staging.mapped),static_cast<size_t>(bytes));
+    std::fill_n(pixels.begin(),4,std::uint8_t{255});
+    startCommands(d.device,transferPool,transferCmd);
+    const auto makeBinding=[&](TextureBinding& target,const BaseColorTexture& asset,VkDeviceSize offset) {
+        const VkExtent2D extent{asset.width,asset.height};
+        target.image=d.image(extent,VK_FORMAT_R8G8B8A8_SRGB,
+            VK_IMAGE_USAGE_TRANSFER_DST_BIT|VK_IMAGE_USAGE_SAMPLED_BIT,VK_IMAGE_ASPECT_COLOR_BIT,"Base-color image");
+        imageBarrier(transferCmd,target.image.handle,VK_IMAGE_ASPECT_COLOR_BIT,VK_IMAGE_LAYOUT_UNDEFINED,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,VK_PIPELINE_STAGE_2_NONE,0,
+            VK_PIPELINE_STAGE_2_COPY_BIT,VK_ACCESS_2_TRANSFER_WRITE_BIT);
+        VkBufferImageCopy copy{};
+        copy.bufferOffset=offset;
+        copy.imageSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};
+        copy.imageExtent={extent.width,extent.height,1};
+        vkCmdCopyBufferToImage(transferCmd,staging.handle,target.image.handle,
+                               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,1,&copy);
+        imageBarrier(transferCmd,target.image.handle,VK_IMAGE_ASPECT_COLOR_BIT,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,VK_PIPELINE_STAGE_2_COPY_BIT,VK_ACCESS_2_TRANSFER_WRITE_BIT,
+            VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+
+        const auto address=[](TextureWrap mode) {
+            if (mode==TextureWrap::Clamp) return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+            if (mode==TextureWrap::Mirror) return VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
+            return VK_SAMPLER_ADDRESS_MODE_REPEAT;
+        };
+        const auto filter=[](TextureFilter mode) {
+            return mode==TextureFilter::Nearest ? VK_FILTER_NEAREST : VK_FILTER_LINEAR;
+        };
+        VkSamplerCreateInfo sampler{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+        sampler.magFilter=filter(asset.mag);
+        sampler.minFilter=filter(asset.min);
+        sampler.addressModeU=address(asset.wrapU);
+        sampler.addressModeV=address(asset.wrapV);
+        sampler.addressModeW=VK_SAMPLER_ADDRESS_MODE_REPEAT;
+        sampler.mipmapMode=VK_SAMPLER_MIPMAP_MODE_NEAREST;
+        sampler.maxLod=VK_LOD_CLAMP_NONE;
+        check(vkCreateSampler(d.device,&sampler,nullptr,&target.sampler),"Creating base-color sampler");
+        VkDescriptorSetAllocateInfo alloc{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+        alloc.descriptorPool=batch->pool;
+        alloc.descriptorSetCount=1;
+        alloc.pSetLayouts=&textureLayout;
+        check(vkAllocateDescriptorSets(d.device,&alloc,&target.set),"Allocating material descriptor set");
+        const VkDescriptorImageInfo image{VK_NULL_HANDLE,target.image.view,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+        const VkDescriptorImageInfo samplerInfo{target.sampler,VK_NULL_HANDLE,VK_IMAGE_LAYOUT_UNDEFINED};
+        VkWriteDescriptorSet writes[2]{};
+        for (auto& write:writes) {
+            write.sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            write.dstSet=target.set;
+            write.descriptorCount=1;
+        }
+        writes[0].dstBinding=shaders::imageBinding;
+        writes[0].descriptorType=VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+        writes[0].pImageInfo=&image;
+        writes[1].dstBinding=shaders::samplerBinding;
+        writes[1].descriptorType=VK_DESCRIPTOR_TYPE_SAMPLER;
+        writes[1].pImageInfo=&samplerInfo;
+        vkUpdateDescriptorSets(d.device,2,writes,0,nullptr);
+    };
+    BaseColorTexture white;
+    white.width=white.height=1;
+    makeBinding(batch->white,white,0);
+    size_t offset=4;
+    for (const auto& [key,source]:sources) {
+        auto& target=batch->entries[key];
+        const auto& asset=key.second;
+        const auto start=offset;
+        offset+=asset.rgbaSize();
+        try { source->readTexturePixels(asset,pixels.subspan(start,asset.rgbaSize())); }
+        catch (const std::runtime_error&) {
+            ++batch->warnings;
+            target.set=batch->white.set;
+            continue;
+        }
+        makeBinding(target,asset,start);
+    }
+    check(vmaFlushAllocation(d.allocator,staging.allocation,0,VK_WHOLE_SIZE),"Flushing texture upload");
+    pendingTextures=std::move(batch);
+    textureStaging=std::move(staging);
+    finishTransfer();
+    // Earlier frames using old descriptors have retired on this graphics queue.
+    textures=std::move(pendingTextures);
+    textureStaging={};
 }
 void Renderer::Impl::releaseSwap() {
     for (auto& image : images)
@@ -532,11 +676,12 @@ void Renderer::Impl::makePipelines() {
     stages[1].pName = "main";
     VkVertexInputBindingDescription stream{0, sizeof(Vertex), VK_VERTEX_INPUT_RATE_VERTEX};
     VkVertexInputAttributeDescription inputs[] = {{0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0},
-                                                  {1, 0, VK_FORMAT_R32G32B32_SFLOAT, 12}};
+                                                  {1, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(Vertex,normal)},
+                                                  {2, 0, VK_FORMAT_R32G32_SFLOAT, offsetof(Vertex,uv)}};
     VkPipelineVertexInputStateCreateInfo vertex{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
     vertex.vertexBindingDescriptionCount = 1;
     vertex.pVertexBindingDescriptions = &stream;
-    vertex.vertexAttributeDescriptionCount = 2;
+    vertex.vertexAttributeDescriptionCount = static_cast<uint32_t>(std::size(inputs));
     vertex.pVertexAttributeDescriptions = inputs;
     VkPipelineInputAssemblyStateCreateInfo topology{
         VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
@@ -705,17 +850,23 @@ void Renderer::Impl::record(Frame& f, std::span<const SceneDraw> draws, uint32_t
     VkDeviceSize zero{};
     vkCmdBindVertexBuffers(cmd, 0, 1, &geometry.handle, &zero);
     vkCmdBindIndexBuffer(cmd, geometry.handle, indexOffset, VK_INDEX_TYPE_UINT32);
-    auto submit = [&](size_t i, MeshRange range) {
+    VkDescriptorSet boundTexture{};
+    auto submit = [&](size_t i, MeshRange range, VkDescriptorSet texture) {
         uint32_t off = static_cast<uint32_t>(stride * i);
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, shaders::sceneSet, 1,
                                 &f.constants, 1, &off);
+        if (texture!=boundTexture) {
+            vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_GRAPHICS,layout,shaders::textureSet,1,
+                                    &texture,0,nullptr);
+            boundTexture=texture;
+        }
         vkCmdDrawIndexed(cmd, range.count, 1, range.startIndex, 0, 0);
     };
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ground);
-    submit(0, ranges[3]);
+    submit(0, ranges[3],textures->white.set);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
     for (size_t i = 0; i < draws.size(); ++i)
-        submit(i+1,draws[i].range);
+        submit(i+1,draws[i].range,draws[i].texture);
     vkCmdEndRendering(cmd);
     for (auto* image : {&f.color, &f.ids})
         imageBarrier(cmd, image->handle, image->aspect, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
@@ -748,6 +899,16 @@ void Renderer::Impl::draw(std::span<const DrawObject> objects, const Camera& cam
     for(const auto& object:objects) if(object.asset) assets.try_emplace(object.asset->digest(),object.asset.get());
     if(assets.size()!=imported.size() || !std::equal(assets.begin(),assets.end(),imported.begin(),
             [](const auto& a,const auto& b){return a.first==b.first;})) upload(assets);
+    TextureSources sources;
+    for (const auto& object:objects) {
+        if (!object.token || !object.asset) continue;
+        for (std::uint32_t slot=0;slot<object.asset->materialSlots().size();++slot)
+            if (const auto* texture=object.asset->textureForSlot(slot,object.texturesOff))
+                sources.try_emplace({object.asset->digest(),*texture},object.asset.get());
+    }
+    if (!textures || sources.size()!=textures->entries.size() ||
+        !std::equal(sources.begin(),sources.end(),textures->entries.begin(),
+                    [](const auto& a,const auto& b){return a.first==b.first;})) uploadTextures(sources);
     std::vector<SceneDraw> draws;
     draws.reserve(objects.size());
     for (const auto& object:objects) {
@@ -755,10 +916,12 @@ void Renderer::Impl::draw(std::span<const DrawObject> objects, const Camera& cam
         if (object.asset) {
             for (const auto& primitive:imported.at(object.asset->digest())) {
                 const auto color=object.asset->colorForSlot(primitive.slot,object.color,object.slotColors);
-                draws.push_back({&object,primitive.range,color});
+                const auto* image=primitive.hasUv ? object.asset->textureForSlot(primitive.slot,object.texturesOff) : nullptr;
+                const auto set=image ? textures->entries.at({object.asset->digest(),*image}).set : textures->white.set;
+                draws.push_back({&object,primitive.range,color,set});
             }
         } else if (const auto kind=static_cast<uint32_t>(object.mesh); kind<3) {
-            draws.push_back({&object,ranges[kind],object.color});
+            draws.push_back({&object,ranges[kind],object.color,textures->white.set});
         }
     }
     auto& f = frames[current];
@@ -893,6 +1056,9 @@ double Renderer::lastGpuMilliseconds() const {
 unsigned Renderer::validationErrors() const {
     return impl_->d.errors.load();
 }
+unsigned Renderer::textureWarnings() const {
+    return impl_->textures ? impl_->textures->warnings : 0;
+}
 std::string Renderer::diagnostics() const {
     std::ostringstream s;
     s << impl_->d.report() << " | " << impl_->extent.width << "x" << impl_->extent.height << " | "
@@ -901,7 +1067,8 @@ std::string Renderer::diagnostics() const {
       << " | attachment bytes " << impl_->attachmentBytes << ", peak " << impl_->peakAttachmentBytes
       << ", readback capacity " << impl_->readback.size << " | last CPU submit/present " << impl_->cpuMs
       << " ms, last completed GPU frame " << impl_->gpuMs << " ms, pipeline creation " << impl_->pipelineMs
-      << " ms";
+      << " ms | base-color texture bindings " << (impl_->textures ? impl_->textures->entries.size() : 0)
+      << ", decode fallbacks " << textureWarnings();
     return s.str();
 }
 } // namespace platz::engine

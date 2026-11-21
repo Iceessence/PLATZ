@@ -22,7 +22,9 @@ struct Object {
     Vec3 position{}, rotation{}, scale{1,1,1}, color{0.6f,0.7f,0.7f};
     MeshReference asset{};
     std::vector<SlotColor> slotColors;
+    std::vector<std::uint32_t> texturesOff;
     void setSlotColor(std::uint32_t slot, std::optional<std::array<float,3>> srgb);
+    void setTextureEnabled(std::uint32_t slot,bool enabled);
     bool operator==(const Object&) const = default;
 };
 

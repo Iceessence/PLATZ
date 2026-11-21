@@ -1,4 +1,5 @@
 #pragma once
+#include "TextureDecode.hpp"
 #include <array>
 #include <cstdint>
 #include <filesystem>
@@ -11,13 +12,18 @@
 namespace platz {
 struct MeshVertex {
     std::array<float, 3> position, normal;
+    std::array<float, 2> uv{};
 };
 struct MeshPrimitive {
     std::uint32_t firstIndex, indexCount, slot;
+    bool hasUv{};
 };
 struct MeshMaterialSlot {
     std::string name;
     std::optional<std::array<float, 3>> sourceColor;
+    std::optional<BaseColorTexture> texture;
+    std::string textureNote;
+    bool hasSourceTexture() const { return texture || !textureNote.empty(); }
 };
 struct SlotColor {
     std::uint32_t slot;
@@ -38,6 +44,8 @@ class MeshAsset {
     const auto& indices() const { return indices_; }
     const auto& primitives() const { return primitives_; }
     const auto& materialSlots() const { return slots_; }
+    const BaseColorTexture* textureForSlot(std::uint32_t slot, std::span<const std::uint32_t> disabled) const;
+    void readTexturePixels(const BaseColorTexture& texture, std::span<std::uint8_t> rgba) const;
     std::array<float, 3> colorForSlot(std::uint32_t slot, std::array<float, 3> fallback,
                                       std::span<const SlotColor> overrides = {}) const {
         for (const auto& entry : overrides)

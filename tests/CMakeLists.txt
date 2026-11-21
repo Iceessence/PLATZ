@@ -5,7 +5,8 @@ target_link_libraries(platz_gpu_checks PRIVATE platz_engine platz_core)
 target_compile_definitions(platz_gpu_checks PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_compile_definitions(platz_gpu_checks PRIVATE
     PLATZ_TEST_MESH="${PROJECT_SOURCE_DIR}/tests/assets/Oblique spire.glb"
-    PLATZ_TEST_MATERIALS="${PROJECT_SOURCE_DIR}/tests/assets/Color study.glb")
+    PLATZ_TEST_MATERIALS="${PROJECT_SOURCE_DIR}/tests/assets/Color study.glb"
+    PLATZ_TEST_TEXTURE="${PROJECT_SOURCE_DIR}/tests/assets/Harbor signs.glb")
 add_test(NAME hardware_frame_readback COMMAND platz_gpu_checks)
 add_test(NAME hardware_gpu_assisted COMMAND platz_gpu_checks)
 add_test(NAME validation_scene_profile COMMAND platz_gpu_checks --profile "${PROJECT_SOURCE_DIR}/projects/PLATZ Validation.platz")
@@ -19,7 +20,8 @@ target_link_libraries(platz_studio_checks PRIVATE platz_studio Qt6::Test)
 target_compile_definitions(platz_studio_checks PRIVATE
     PLATZ_TEST_MESH="${PROJECT_SOURCE_DIR}/tests/assets/Oblique spire.glb"
     PLATZ_TEST_REPLACEMENT="${PROJECT_SOURCE_DIR}/tests/assets/Low spire.glb"
-    PLATZ_TEST_MATERIALS="${PROJECT_SOURCE_DIR}/tests/assets/Color study.glb")
+    PLATZ_TEST_MATERIALS="${PROJECT_SOURCE_DIR}/tests/assets/Color study.glb"
+    PLATZ_TEST_TEXTURE="${PROJECT_SOURCE_DIR}/tests/assets/Harbor signs.glb")
 target_compile_definitions(platz_studio_checks PRIVATE PLATZ_VALIDATION_PATH="${PROJECT_SOURCE_DIR}/projects/PLATZ Validation.platz")
 add_test(NAME studio_edit_play_reopen COMMAND platz_studio_checks)
 set_tests_properties(studio_edit_play_reopen PROPERTIES LABELS "hardware;interactive" TIMEOUT 90)

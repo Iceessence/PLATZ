@@ -15,6 +15,7 @@
 #include <limits>
 #include <cstdio>
 #include <stdexcept>
+#include <set>
 #include <unordered_map>
 
 namespace platz {
@@ -42,6 +43,9 @@ constexpr const char* snapshotsSql =
 constexpr const char* slotColorsSql =
     "CREATE TABLE slot_colors(rev INTEGER NOT NULL,object_id TEXT NOT NULL,slot INTEGER NOT NULL,"
     "r REAL NOT NULL,g REAL NOT NULL,b REAL NOT NULL,PRIMARY KEY(rev,object_id,slot))";
+constexpr const char* textureOffSql =
+    "CREATE TABLE texture_off(rev INTEGER NOT NULL,object_id TEXT NOT NULL,slot INTEGER NOT NULL,"
+    "PRIMARY KEY(rev,object_id,slot))";
 
 [[noreturn]] void fail(const std::string& message) { throw std::runtime_error(message); }
 
@@ -120,6 +124,25 @@ void validate(const Object& obj) {
         if (!in({value.srgb[0],value.srgb[1],value.srgb[2]},0,1))
             fail("Material slot sRGB channels must be between 0 and 1.");
     }
+    for (size_t i=0;i<obj.texturesOff.size();++i) {
+        const auto slot=obj.texturesOff[i];
+        if (slot>=slots || !obj.asset.data->materialSlots()[slot].hasSourceTexture() ||
+            (i && obj.texturesOff[i-1]>=slot)) fail("Invalid base-color texture override.");
+    }
+}
+void validateTextureBudget(const std::vector<Object>& objects) {
+    std::set<std::pair<std::string_view,BaseColorTexture>> active;
+    size_t bytes=0;
+    for (const auto& object:objects) {
+        const auto& asset=object.asset.data;
+        if (!asset) continue;
+        for (std::uint32_t slot=0;slot<asset->materialSlots().size();++slot) {
+            const auto* texture=asset->textureForSlot(slot,object.texturesOff);
+            if (texture && active.emplace(asset->digest(),*texture).second) bytes+=texture->rgbaSize();
+        }
+    }
+    if (active.size()>BaseColorTexture::maxActive || bytes>BaseColorTexture::maxActiveBytes)
+        fail("Active base-color textures exceed the scene's 64-image or 64 MiB limit.");
 }
 
 struct Database {
@@ -198,7 +221,7 @@ struct Metadata { std::string id,scene,name,token; std::uint64_t head; int versi
 Metadata readMeta(Database& db) {
     if (scalar(db,"PRAGMA application_id") != applicationId) fail("This file is not a PLATZ project.");
     auto version = scalar(db,"PRAGMA user_version");
-    if (version<1 || version>5) fail("Unsupported PLATZ project version. Open it with a compatible build.");
+    if (version<1 || version>6) fail("Unsupported PLATZ project version. Open it with a compatible build.");
     Statement schema(db,"SELECT name,sql FROM sqlite_schema WHERE sql IS NOT NULL ORDER BY name");
     auto checkTable = [&](const char* name, const char* definition) {
         if (!schema.row() || schema.str(0) != name || schema.str(1) != definition)
@@ -210,6 +233,7 @@ Metadata readMeta(Database& db) {
     checkTable("project", projectSql);
     if (version>=5) checkTable("slot_colors",slotColorsSql);
     if (version >= 2) checkTable("snapshots", snapshotsSql);
+    if (version>=6) checkTable("texture_off",textureOffSql);
     if (schema.row()) fail("Unrecognized project schema. The original file was preserved.");
     Statement q(db,"SELECT id,scene,name,token,head FROM project WHERE singleton=1");
     if (!q.row()) fail("Missing project identity.");
@@ -270,6 +294,11 @@ std::vector<Object> readObjects(Database& db, std::uint64_t rev, int version, Me
             o.asset=asset->second.asset;
             if (version<5 && o.asset.data->materialSlots().front().sourceColor)
                 o.slotColors.push_back({0,{o.color.x,o.color.y,o.color.z}});
+            if (version<6) {
+                const auto& slots=o.asset.data->materialSlots();
+                for (std::uint32_t slot=0;slot<slots.size();++slot)
+                    if(slots[slot].hasSourceTexture()) o.texturesOff.push_back(slot);
+            }
         }
         if (!ids.emplace(o.id,result.size()).second) fail("Duplicate object identity in project.");
         result.push_back(std::move(o));
@@ -286,7 +315,19 @@ std::vector<Object> readObjects(Database& db, std::uint64_t rev, int version, Me
                 {static_cast<std::uint32_t>(index),{colors.number(2),colors.number(3),colors.number(4)}});
         }
     }
+    if (version>=6) {
+        Statement disabled(db,"SELECT object_id,slot FROM texture_off WHERE rev=? ORDER BY object_id,slot");
+        disabled.bind(1,static_cast<std::int64_t>(rev));
+        while (disabled.row()) {
+            const auto object=ids.find(disabled.str(0));
+            const auto index=disabled.integer(1);
+            if (object==ids.end() || index<0 || index>=MeshAsset::maxPrimitives)
+                fail("Saved texture override references an invalid slot.");
+            result[object->second].texturesOff.push_back(static_cast<std::uint32_t>(index));
+        }
+    }
     for (const auto& object:result) validate(object);
+    validateTextureBudget(result);
     if (version >= 2) {
         Statement count(db, "SELECT object_count FROM snapshots WHERE rev=?");
         count.bind(1,static_cast<std::int64_t>(rev));
@@ -371,6 +412,18 @@ void putSlotColors(Database& db, const std::vector<Object>& objects, std::uint64
         }
     }
 }
+void putTextureOverrides(Database& db, const std::vector<Object>& objects, std::uint64_t rev) {
+    Statement write(db,"INSERT INTO texture_off VALUES(?,?,?)");
+    for (const auto& object:objects) {
+        for (const auto slot:object.texturesOff) {
+            write.bind(1,static_cast<std::int64_t>(rev));
+            write.bind(2,object.id);
+            write.bind(3,static_cast<std::int64_t>(slot));
+            write.done();
+            write.check(sqlite3_reset(write.stmt));
+        }
+    }
+}
 std::filesystem::path reserveTemp(const fs::path& dest) {
     auto temp = dest;
     temp += ".building-" + newId();
@@ -428,6 +481,15 @@ void Object::setSlotColor(std::uint32_t slot, std::optional<std::array<float,3>>
         else slotColors.erase(match);
     } else if (srgb) {
         slotColors.insert(match,{slot,*srgb});
+    }
+}
+
+void Object::setTextureEnabled(std::uint32_t slot,bool enabled) {
+    auto match=std::lower_bound(texturesOff.begin(),texturesOff.end(),slot);
+    if (match!=texturesOff.end() && *match==slot) {
+        if (enabled) texturesOff.erase(match);
+    } else if (!enabled) {
+        texturesOff.insert(match,slot);
     }
 }
 
@@ -502,6 +564,7 @@ void Project::replace(SceneState next) {
     size_t bytes=0;
     for (const auto& item:next.meshes) bytes+=item.second.asset.data->source().size();
     if (bytes>maxMeshSourceBytes) fail("The asset library supports up to 8 MiB of embedded meshes.");
+    validateTextureBudget(next.objects);
     undo_.push_back(scene_);
     if (undo_.size() > maxUndo) undo_.erase(undo_.begin());
     scene_=std::move(next); redo_.clear(); ++revision_;
@@ -558,7 +621,10 @@ void Project::assignMesh(const std::string& objectId, const std::string& digest,
     auto replacement=*object;
     replacement.mesh=Mesh::Imported;
     replacement.asset=findMesh(scene_.meshes,digest).asset;
-    if (replacement.asset!=object->asset) replacement.slotColors.clear();
+    if (replacement.asset!=object->asset) {
+        replacement.slotColors.clear();
+        replacement.texturesOff.clear();
+    }
     edit(replacement,expectedRevision);
 }
 std::string Project::replaceMeshInstances(const std::string& digest, const std::filesystem::path& source,
@@ -571,7 +637,10 @@ std::string Project::replaceMeshInstances(const std::string& digest, const std::
     bool used=false;
     for (auto& object: next.objects) {
         if (object.asset==original) {
-            if (object.asset!=replacement) object.slotColors.clear();
+            if (object.asset!=replacement) {
+                object.slotColors.clear();
+                object.texturesOff.clear();
+            }
             object.asset=replacement;
             used=true;
         }
@@ -683,10 +752,15 @@ void Project::save() {
         if (meta.version<5) {
             db.exec(slotColorsSql);
             putSlotColors(db,saved_.objects,head_);
-            db.exec("PRAGMA user_version=5");
+        }
+        if (meta.version<6) {
+            db.exec(textureOffSql);
+            putTextureOverrides(db,saved_.objects,head_);
+            db.exec("PRAGMA user_version=6");
         }
         putLibrary(db,scene_.meshes,revision_);
         putSlotColors(db,scene_.objects,revision_);
+        putTextureOverrides(db,scene_.objects,revision_);
     }
     putObjects(db,scene_.objects,revision_);
     Statement update(db,"UPDATE project SET head=?,token=? WHERE singleton=1 AND token=?");
@@ -704,6 +778,9 @@ void Project::save() {
         Statement pruneColors(db,"DELETE FROM slot_colors WHERE rev < ?");
         pruneColors.bind(1,static_cast<std::int64_t>(head_));
         pruneColors.done();
+        Statement pruneTextures(db,"DELETE FROM texture_off WHERE rev < ?");
+        pruneTextures.bind(1,static_cast<std::int64_t>(head_));
+        pruneTextures.done();
         db.exec("DELETE FROM assets WHERE key NOT IN (SELECT key FROM mesh_library)");
     }
     if(scalar(db,"PRAGMA page_count")*scalar(db,"PRAGMA page_size")>maxFileBytes)

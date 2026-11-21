@@ -308,7 +308,7 @@ void assetLibrarySuite() {
     auto legacy=Project::create(migration.source,"Legacy v3 library");
     const auto legacyId=legacy.importMesh(PLATZ_TEST_MESH,legacy.revision());
     legacy.save();
-    alter(migration.source,"DROP TABLE slot_colors; DROP TABLE mesh_library; PRAGMA user_version=3");
+    alter(migration.source,"DROP TABLE texture_off; DROP TABLE slot_colors; DROP TABLE mesh_library; PRAGMA user_version=3");
     auto migrated=Project::open(migration.source);
     expect(migrated.find(legacyId) && migrated.meshLibrary().contains(originalDigest),
            "Legacy project failed to discover its referenced mesh.");
@@ -377,7 +377,7 @@ void materialSuite() {
     auto old=Project::create(legacyFixture.source,"Flat color from v4");
     const auto legacyId=old.importMesh(PLATZ_TEST_LEGACY_COLOR,old.revision());
     old.save();
-    alter(legacyFixture.source,"DROP TABLE slot_colors; PRAGMA user_version=4");
+    alter(legacyFixture.source,"DROP TABLE texture_off; DROP TABLE slot_colors; PRAGMA user_version=4");
     auto migrated=Project::open(legacyFixture.source);
     auto legacy=*migrated.find(legacyId);
     const std::array expected{legacy.color.x,legacy.color.y,legacy.color.z};
@@ -394,13 +394,102 @@ void materialSuite() {
     expect(*upgraded.find(legacyId)==legacy,"Migration lost the prior revision's appearance.");
     pass("v4 flat-color appearance and previous revision preserved through schema v5 migration");
 }
+
+void textureSuite() {
+    const auto asset=MeshAsset::load(PLATZ_TEST_TEXTURE);
+    const auto& materials=asset->materialSlots();
+    expect(materials.size()==2 && materials[0].texture && materials[1].texture,"Embedded textures were not parsed.");
+    const auto& png=*materials[0].texture;
+    const auto& jpeg=*materials[1].texture;
+    expect(png.encoding==TextureEncoding::Png && png.width==32 && png.height==32 &&
+           png.min==TextureFilter::Nearest && png.wrapU==TextureWrap::Clamp &&
+           jpeg.encoding==TextureEncoding::Jpeg && jpeg.width==64 && jpeg.height==64 &&
+           jpeg.mag==TextureFilter::Linear && jpeg.wrapV==TextureWrap::Repeat,"Image metadata or sampler mapping is incorrect.");
+    expect(asset->primitives()[0].hasUv && asset->primitives()[1].hasUv &&
+           asset->vertices()[2].uv==std::array{1.f,0.f} && asset->vertices()[4].uv==std::array{0.f,1.f},
+           "Float or normalized TEXCOORD_0 was decoded incorrectly.");
+    std::vector<std::uint8_t> pixels(png.rgbaSize());
+    asset->readTexturePixels(png,pixels);
+    expect(pixels[0]==240 && pixels[1]==32 && pixels[2]==28 && pixels[3]==255,"PNG RGBA or row order changed.");
+    pixels.resize(jpeg.rgbaSize());
+    asset->readTexturePixels(jpeg,pixels);
+    expect(pixels[2]>pixels[1]+80 && pixels[2]>pixels[0]+80,"JPEG decode failed to preserve the expected blue.");
+    rejects([&]{asset->readTexturePixels(jpeg,std::span(pixels).first(15));});
+
+    auto damaged=asset->source();
+    damaged[png.offset]=0;
+    const auto flat=MeshAsset::decode(damaged);
+    expect(!flat->materialSlots()[0].texture && flat->materialSlots()[0].hasSourceTexture() &&
+           flat->materialSlots()[1].texture && flat->indices()==asset->indices(),
+           "Malformed optional texture damaged unrelated geometry or materials.");
+    auto oversized=asset->source();
+    const std::array<std::uint8_t,4> enlargedWidth{0,0,4,1};
+    const std::array<std::uint8_t,4> enlargedHeaderCrc{0x63,0x3c,0x61,0x98};
+    std::copy(enlargedWidth.begin(),enlargedWidth.end(),oversized.begin()+png.offset+16);
+    std::copy(enlargedHeaderCrc.begin(),enlargedHeaderCrc.end(),oversized.begin()+png.offset+29);
+    const auto tooLarge=MeshAsset::decode(oversized);
+    expect(!tooLarge->materialSlots()[0].texture && tooLarge->materialSlots()[0].textureNote.find("1024")!=std::string::npos,
+           "Oversized PNG dimensions did not trigger a bounded flat-color fallback.");
+    pass("embedded PNG/JPEG decoding, bounded pixel buffers, UV0 and malformed-image fallback");
+
+    Fixture fixture;
+    auto project=Project::create(fixture.source,"Texture overrides");
+    const auto id=project.importMesh(PLATZ_TEST_TEXTURE,project.revision());
+    project.save();
+    const auto original=*project.find(id);
+    Runtime running(project);
+    auto changed=original;
+    changed.setTextureEnabled(0,false);
+    auto invalid=original;
+    invalid.setTextureEnabled(2,false);
+    rejects([&]{project.edit(invalid,project.revision());});
+    project.edit(changed,project.revision());
+    expect(!changed.asset.data->textureForSlot(0,changed.texturesOff) &&
+           changed.asset.data->textureForSlot(1,changed.texturesOff) && running.objects().back()==original,
+           "Texture toggle changed the other slot or the Play snapshot.");
+    project.undo(); expect(*project.find(id)==original,"Undo did not restore the imported texture.");
+    project.redo(); expect(*project.find(id)==changed,"Redo lost the texture override.");
+    project.save();
+    auto reopened=Project::open(fixture.source);
+    expect(*reopened.find(id)==changed,"Texture override did not persist.");
+    reopened.restorePrevious();
+    expect(*reopened.find(id)==original,"Previous revision did not restore the texture.");
+
+    Fixture legacyFixture;
+    auto legacy=Project::create(legacyFixture.source,"Legacy flat preview");
+    const auto legacyId=legacy.importMesh(PLATZ_TEST_TEXTURE,legacy.revision());
+    legacy.save();
+    alter(legacyFixture.source,"DROP TABLE texture_off; PRAGMA user_version=5");
+    auto migrated=Project::open(legacyFixture.source);
+    auto migratedObject=*migrated.find(legacyId);
+    expect(migratedObject.texturesOff==std::vector<std::uint32_t>{0,1},
+           "Opening legacy source activated textures that were previously flat.");
+    migratedObject.setTextureEnabled(0,true);
+    migrated.edit(migratedObject,migrated.revision());
+    migrated.save();
+    auto v6=Project::open(legacyFixture.source);
+    expect(*v6.find(legacyId)==migratedObject,"Migration failed to save the explicit texture toggle.");
+    v6.restorePrevious();
+    expect(v6.find(legacyId)->texturesOff==std::vector<std::uint32_t>{0,1},"Migration changed the legacy revision.");
+    pass("texture override undo, Play isolation, persistence and schema v5 flat-appearance migration");
+}
 }
 
 int main(int argc, char** argv) {
     try {
         if(argc==3 && std::string(argv[1])=="--interrupt-assets")
-            alter(argv[2],"BEGIN IMMEDIATE; DELETE FROM slot_colors; DELETE FROM mesh_library; DELETE FROM assets; "
+            alter(argv[2],"BEGIN IMMEDIATE; DELETE FROM texture_off; DELETE FROM slot_colors; DELETE FROM mesh_library; DELETE FROM assets; "
                           "UPDATE project SET head=777",true);
+        if(argc==3 && std::string(argv[1])=="--extend-validation-textures") {
+            auto scene=Project::open(argv[2]);
+            const auto id=scene.importMesh(PLATZ_TEST_TEXTURE,scene.revision());
+            auto object=*scene.find(id);
+            object.position={2.3f,0,1.7f};
+            object.scale={.55f,.68f,.55f};
+            scene.edit(object,scene.revision());
+            scene.save();
+            return 0;
+        }
         if(argc==3 && std::string(argv[1])=="--extend-validation-materials") {
             auto scene=Project::open(argv[2]);
             const auto id=scene.importMesh(PLATZ_TEST_MATERIALS,scene.revision());
@@ -431,6 +520,7 @@ int main(int argc, char** argv) {
         suite(std::filesystem::absolute(argv[0]));
         assetLibrarySuite();
         materialSuite();
+        textureSuite();
         std::cout<<passed<<" Core scenarios passed.\n";
         return 0;
     } catch (const std::exception& e) {

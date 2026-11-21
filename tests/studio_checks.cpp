@@ -3,6 +3,7 @@
 #include "Viewport.hpp"
 #include <QApplication>
 #include <QAction>
+#include <QCheckBox>
 #include <QComboBox>
 #include <QDockWidget>
 #include <QInputMethodEvent>
@@ -310,6 +311,68 @@ void exerciseMaterialSlots(QTemporaryDir& dir) {
     }
     std::cout<<"Material slot selection, editing, reset/undo, Play and pixel-identical reopen passed\n";
 }
+void exerciseTextures(QTemporaryDir& dir) {
+    const auto file=dir.filePath("Textured slots.platz");
+    const auto source=dir.filePath("Harbor signs.glb");
+    check(QFile::copy(PLATZ_TEST_TEXTURE,source),"Could not create disposable textured source.");
+    Capture saved;
+    std::string objectId;
+    {
+        StudioWindow window;
+        expose(window);
+        fileAction(window,Qt::Key_N,file);
+        chooseFile(source,[&]{control<QAction>(window,"importGlb")->trigger();});
+        auto* tree=control<QListWidget>(window,"sceneTree");
+        objectId=tree->currentItem()->data(Qt::UserRole).toString().toStdString();
+        auto* viewport=static_cast<Viewport*>(control<QWidget>(window,"viewport"));
+        auto* toggle=control<QCheckBox>(window,"useBaseColorTexture");
+        auto* picker=control<QComboBox>(window,"materialSlot");
+        check(picker->count()==2 && toggle->isVisible() && toggle->isChecked(),"New texture is missing from its material slot.");
+        enterText(control<QDoubleSpinBox>(window,"positionY"),"3.5");
+        viewport->setFocus();
+        QTest::keyClick(viewport,Qt::Key_F);
+        const auto textured=settledFrame(*viewport);
+        toggle->click();
+        saved=settledFrame(*viewport);
+        check(!toggle->isChecked() && textured.tokens==saved.tokens && textured.rgba!=saved.rgba,
+              "Texture switch did not change the viewport with stable picking IDs.");
+        picker->setCurrentIndex(1);
+        check(toggle->isChecked(),"Disabling PNG affected the JPEG slot.");
+        picker->setCurrentIndex(0);
+        viewport->setFocus();
+        QTest::keyClick(viewport,Qt::Key_Z,Qt::ControlModifier);
+        check(toggle->isChecked() && settledFrame(*viewport).rgba==textured.rgba,"Undo did not restore sampled pixels.");
+        QTest::keyClick(viewport,Qt::Key_Y,Qt::ControlModifier);
+        check(!toggle->isChecked() && settledFrame(*viewport).rgba==saved.rgba,"Redo lost the texture override.");
+        auto* play=control<QPushButton>(window,"playButton");
+        QTest::mouseClick(play,Qt::LeftButton);
+        check(!toggle->isEnabled(),"Texture authoring remained active in Play.");
+        const auto point=visiblePoint(settledFrame(*viewport),5,*viewport);
+        QTest::mouseClick(viewport,Qt::LeftButton,{},point);
+        check(settledFrame(*viewport).tokens!=saved.tokens,"Play did not rotate the textured object.");
+        QTest::mouseClick(play,Qt::LeftButton);
+        check(settledFrame(*viewport).rgba==saved.rgba,"Play altered authored texture state.");
+        QTest::mouseClick(control<QPushButton>(window,"saveButton"),Qt::LeftButton);
+        check(window.close(),"Textured project did not close after saving.");
+    }
+    check(QFile::remove(source),"Could not remove the disposable textured GLB.");
+    {
+        StudioWindow window;
+        expose(window);
+        fileAction(window,Qt::Key_O,file);
+        auto* viewport=static_cast<Viewport*>(control<QWidget>(window,"viewport"));
+        auto* tree=control<QListWidget>(window,"sceneTree");
+        tree->setCurrentRow(4);
+        check(tree->currentItem()->data(Qt::UserRole).toString().toStdString()==objectId &&
+              !control<QCheckBox>(window,"useBaseColorTexture")->isChecked(),"Reopen lost the object or texture override.");
+        viewport->setFocus();
+        QTest::keyClick(viewport,Qt::Key_F);
+        const auto reopened=settledFrame(*viewport);
+        check(reopened.tokens==saved.tokens && reopened.rgba==saved.rgba,"Reopened texture rendering changed.");
+        check(window.close(),"Reopened texture project did not close.");
+    }
+    std::cout<<"Studio texture switching, undo/redo, Play isolation and pixel-identical reopen passed\n";
+}
 void exercise(const QString& path, bool create) {
     const std::filesystem::path file(path.toStdWString());
     std::string projectId, sceneId, editedId;
@@ -481,5 +544,6 @@ int main(int argc, char** argv) {
         exerciseImport(temp);
         exerciseAssetLibrary(temp);
         exerciseMaterialSlots(temp);
+        exerciseTextures(temp);
     } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }

@@ -10,16 +10,20 @@
     uint selected;
     uint meshKind;
 };
+[[vk::binding(0, 1)]] Texture2D<float4> colorTexture;
+[[vk::binding(1, 1)]] SamplerState colorSampler;
 
 struct Vertex {
     [[vk::location(0)]] float3 position : POSITION;
     [[vk::location(1)]] float3 normal : NORMAL;
+    [[vk::location(2)]] float2 uv : TEXCOORD0;
 };
 struct Surface {
     float4 clip : SV_Position;
     [[vk::location(0)]] float3 position : POSITION;
     [[vk::location(1)]] float3 normal : NORMAL;
     [[vk::location(2)]] float3 local : TEXCOORD;
+    [[vk::location(3)]] float2 uv : TEXCOORD1;
 };
 struct Pixel {
     float4 color : SV_Target0;
@@ -32,6 +36,7 @@ Surface vsMain(Vertex v) {
     float4 p = mul(float4(v.position, 1), world);
     result.position = p.xyz;
     result.local = v.position;
+    result.uv = v.uv;
     result.normal = mul(float4(v.normal, 0), normalMatrix).xyz;
     result.clip = mul(p, viewProjection);
     return result;
@@ -71,7 +76,8 @@ Pixel psMain(Surface s) {
     float3 irradiance = lerp(float3(0.22, 0.23, 0.28), float3(0.46, 0.54, 0.65), hemi)
                       + diffuse * float3(0.85, 0.80, 0.72);
     float spec = pow(saturate(dot(n, normalize(view + light))), 36) * diffuse * 0.12;
-    float3 color = linearToSrgb(srgbToLinear(baseColor) * irradiance + spec);
+    float3 texel = colorTexture.Sample(colorSampler, s.uv).rgb;
+    float3 color = linearToSrgb(srgbToLinear(baseColor) * texel * irradiance + spec);
     if (token == selected) {
         float outline = 1 - smoothstep(0.06, 0.24, abs(dot(n, view)));
         if (meshKind == 0) {

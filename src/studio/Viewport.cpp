@@ -35,7 +35,7 @@ void Viewport::setScene(const std::vector<platz::Object>& objects, const std::st
         ids_.push_back(object.id);
         const auto token = static_cast<std::uint32_t>(ids_.size());
         draws_.push_back({token, toEngine(object.mesh), toEngine(object.position), toEngine(object.rotation),
-                          toEngine(object.scale), toEngine(object.color),object.asset.data,object.slotColors});
+                          toEngine(object.scale), toEngine(object.color),object.asset.data,object.slotColors,object.texturesOff});
         if (selection == object.id) selection_ = token;
     }
     update();
@@ -68,6 +68,7 @@ void Viewport::retryRenderer() {
     renderer_.reset();
     displayedIds_.clear();
     surface_ = {};
+    backendText_.clear();
     failed_ = false;
     update();
 }
@@ -76,7 +77,6 @@ void Viewport::paintEvent(QPaintEvent*) {
     try {
         if (!renderer_) {
             renderer_ = std::make_unique<platz::engine::Renderer>(reinterpret_cast<void*>(winId()));
-            if (onBackend) onBackend(QString::fromStdString(renderer_->adapter()));
         }
         const QSize pixels = size() * devicePixelRatioF();
         if (pixels != surface_) {
@@ -84,6 +84,13 @@ void Viewport::paintEvent(QPaintEvent*) {
             surface_ = pixels;
         }
         renderer_->draw(draws_, camera_, selection_);
+        auto backend=QString::fromStdString(renderer_->adapter());
+        if (const auto failures=renderer_->textureWarnings())
+            backend+=tr(" · %n texture(s) unavailable",nullptr,static_cast<int>(failures));
+        if (backend!=backendText_) {
+            backendText_=backend;
+            if (onBackend) onBackend(backendText_);
+        }
         displayedIds_ = ids_;
     } catch (const std::exception& error) { fail(error); }
 }

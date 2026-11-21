@@ -24,7 +24,8 @@ def main():
         original = output.read_bytes()
         subprocess.run(compile_cmd, check=True)
         assert output.read_bytes() == original, "The same compiler inputs yielded different output"
-        for expected in ("sceneSet=0, sceneBinding=0, sceneSize=240", "baseColor=192", "meshKind=224"):
+        for expected in ("sceneSet=0, sceneBinding=0, sceneSize=240", "baseColor=192", "meshKind=224",
+                         "textureSet=1, imageBinding=0, samplerBinding=1"):
             assert expected.encode() in original, "Reflected material layout changed: " + expected
         include.write_text(include.read_text().replace("12.92", "12.50"))
         subprocess.run(compile_cmd, check=True)
