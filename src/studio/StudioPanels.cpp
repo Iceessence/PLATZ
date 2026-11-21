@@ -22,6 +22,7 @@
 namespace {
 QLabel* label(const QString& text, const char* role = "") {
     auto* value = new QLabel(text);
+    value->setTextFormat(Qt::PlainText);
     value->setProperty("role", role);
     return value;
 }
@@ -137,7 +138,7 @@ void StudioWindow::buildStudio() {
     controls_->setContentsMargins(10,6,6,6);
     layout->addWidget(controls_);
     pages_->addWidget(center);
-    viewport_->onBackend = [this](QString adapter){backend_->setText(QString("Direct3D 12  ·  %1").arg(adapter));};
+    viewport_->onBackend = [this](QString adapter){backend_->setText(QString("Vulkan 1.4  ·  %1").arg(adapter));};
     viewport_->onError = [this](QString error){backend_->setText(tr("Renderer unavailable")); notify(error);};
     viewport_->onPick = [this](const std::string& id){ select(id,true); };
 
@@ -193,14 +194,14 @@ void StudioWindow::buildInspector() {
     box->setSpacing(7);
     box->addWidget(label(tr("OBJECT"),"section"));
     name_=new QLineEdit;
-    name_->setMaxLength(120);
+    name_->setMaxLength(240);
     name_->setAccessibleName(tr("Object name"));
     name_->setObjectName("objectName");
     box->addWidget(name_);
     mesh_=label({},"minor");
     box->addWidget(mesh_);
     connect(name_,&QLineEdit::editingFinished,this,[this]{
-        applyEdit([this](platz::Object& o){o.name=name_->text().trimmed().toStdString();});
+        if (name_->isModified()) applyEdit([this](platz::Object& o){o.name=name_->text().toStdString();});
     });
 
     section(box,tr("TRANSFORM"));
@@ -221,7 +222,9 @@ void StudioWindow::buildInspector() {
             field->setToolTip(field->accessibleName());
             field->setDecimals(3);
             field->setButtonSymbols(QAbstractSpinBox::NoButtons);
-            field->setRange(group==2 ? 0.001 : -100000,100000);
+            if (group==0) field->setRange(-100000,100000);
+            if (group==1) field->setRange(-36000,36000);
+            if (group==2) field->setRange(0.001,10000);
             field->setSingleStep(group==1 ? 5.0 : 0.1);
             field->setKeyboardTracking(false);
             field->setMinimumWidth(56);
@@ -230,7 +233,7 @@ void StudioWindow::buildInspector() {
             col->addWidget(label(axes[coordinate],"section"));
             col->addWidget(field);
             row->addLayout(col);
-            connect(field,&QDoubleSpinBox::editingFinished,this,[this,group,coordinate,field]{
+            connect(field,&QDoubleSpinBox::valueChanged,this,[this,group,coordinate,field]{
                 applyEdit([&](platz::Object& o){
                     auto& v = group==0 ? o.position : (group==1 ? o.rotation : o.scale);
                     auto& component = coordinate==0 ? v.x : (coordinate==1 ? v.y : v.z);
@@ -277,4 +280,8 @@ void StudioWindow::buildInspector() {
     scroll->setWidget(inspector_);
     inspectorDock_->setWidget(scroll);
     addDockWidget(Qt::RightDockWidgetArea,inspectorDock_);
+    for (auto* editor : inspector_->findChildren<QLineEdit*>())
+        connect(editor,&QLineEdit::textEdited,this,[this]{
+            if (project_ && !runtime_ && !refreshing_) save_->setEnabled(true);
+        });
 }

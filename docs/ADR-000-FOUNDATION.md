@@ -1,6 +1,8 @@
 # ADR-000 · Engine foundation
 20 November 2026 | Selected for the first Windows development candidate. Owner acceptance pending.
 
+Historical decision. On 21 November the owner selected Vulkan-first engineering. [ADR-001](ADR-001-VULKAN.md) governs current graphics, shader and window integration.
+
 ## Decision
 Build one native C++ application, with a C++20 portable source/API contract and MSVC 14.51 (VS 2026 18.10.3) x64. Use the stable ISO C++23 compiler mode where the qualified MSVC toolset supports it, without depending on preview features. Studio uses dynamically linked Qt Widgets 6.12.0. The Engine owns a native D3D12 device, queues, frame resources, shaders, perspective camera, depth and identification passes. Qt supplies a native child window and accessible editing controls. The renderer receives value-based render input, isolated from Qt and project storage. Hardware features are queried on the selected adapter. Explicit queues, descriptor ownership, immutable mesh sources and fences leave room for compute, parallel command recording, PBR, streaming and DXR. Implement only measured workloads. This first backend targets Windows. Other operating systems require a native surface and a separately qualified backend.
 

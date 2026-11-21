@@ -17,14 +17,15 @@ add_subdirectory(src/engine)
 add_library(platz_studio STATIC src/studio/StudioWindow.cpp src/studio/StudioPanels.cpp src/studio/Viewport.cpp src/studio/Appearance.cpp)
 target_include_directories(platz_studio PUBLIC src/studio)
 target_link_libraries(platz_studio PUBLIC Qt6::Widgets platz_core platz_engine)
-add_executable(PLATZ WIN32 src/studio/main.cpp)
-target_link_libraries(PLATZ PRIVATE platz_studio Qt6::EntryPoint)
+qt_add_executable(PLATZ WIN32 src/studio/main.cpp)
+target_link_libraries(PLATZ PRIVATE platz_studio)
 # Deploy the libraries used by this application, including the Qt platform adapter.
 foreach(lib Core Gui Widgets)
     add_custom_command(TARGET PLATZ POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "$<TARGET_FILE:Qt6::${lib}>" "$<TARGET_FILE_DIR:PLATZ>")
 endforeach()
 add_custom_command(TARGET PLATZ POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:platz_sdl3>" "$<TARGET_FILE_DIR:PLATZ>"
     COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:PLATZ>/platforms"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:Qt6::QWindowsIntegrationPlugin>" "$<TARGET_FILE_DIR:PLATZ>/platforms")
 if(BUILD_TESTING AND EXISTS "${CMAKE_SOURCE_DIR}/tests/CMakeLists.txt")

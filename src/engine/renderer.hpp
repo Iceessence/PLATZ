@@ -23,7 +23,7 @@ struct DrawObject {
 struct Camera {
     Vec3 target{0, 0.85f, 0};
     float yaw{0.58f}, pitch{0.39f}, distance{10.2f}; // Radians, metres
-    void orbit(float deltaX, float deltaY); // Drag distance in client pixels.
+    void orbit(float deltaX, float deltaY);          // Drag distance in client pixels.
     void zoom(float wheelSteps);
     void pan(float deltaX, float deltaY, float viewportHeight);
     void move(float right, float up, float forward); // World distances.
@@ -37,18 +37,24 @@ struct Capture {
 };
 
 class Renderer {
-public:
-    explicit Renderer(void* nativeWindow); // Windows HWND; throws std::runtime_error on failure.
+  public:
+    explicit Renderer(
+        void* nativeWindow,
+        std::uint64_t maxViewportBytes = 512ull << 20); // Windows HWND; throws std::runtime_error on failure.
     ~Renderer();
     Renderer(const Renderer&) = delete;
     Renderer& operator=(const Renderer&) = delete;
     void resize(unsigned width, unsigned height);
     void draw(std::span<const DrawObject> objects, const Camera& camera, std::uint32_t selected = 0);
     std::uint32_t pick(int x, int y); // Physical client coordinates of the last frame.
-    Capture capture(); // Explicit synchronous readback of the last frame.
+    Capture capture();                // Explicit synchronous readback of the last frame.
     const std::string& adapter() const;
-private:
+    std::string diagnostics() const;
+    unsigned validationErrors() const;
+    double lastCpuMilliseconds() const;
+    double lastGpuMilliseconds() const; // Zero until a timestamped frame completes.
+  private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };
-}
+} // namespace platz::engine

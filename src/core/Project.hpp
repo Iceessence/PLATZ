@@ -2,7 +2,6 @@
 
 #include <cstdint>
 #include <filesystem>
-#include <optional>
 #include <string>
 #include <vector>
 
@@ -48,6 +47,8 @@ public:
     void apply(const ObjectEdit& proposal);
     void edit(const Object& replacement, std::uint64_t expectedRevision);
     std::string add(Mesh mesh);
+    std::string duplicate(const std::string& objectId, std::uint64_t expectedRevision);
+    void remove(const std::string& objectId, std::uint64_t expectedRevision);
     void undo();
     void redo();
     void restorePrevious();
@@ -62,6 +63,8 @@ private:
     std::vector<std::vector<Object>> undo_, redo_;
     bool hasPrevious_{};
     void replace(std::vector<Object> next);
+    void requireRevision(std::uint64_t expectedRevision) const;
+    void requireRevisionCapacity() const;
 };
 
 class Runtime {

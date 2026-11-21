@@ -1,10 +1,15 @@
 find_package(Qt6 REQUIRED COMPONENTS Test)
 
 add_executable(platz_gpu_checks gpu_checks.cpp)
-target_link_libraries(platz_gpu_checks PRIVATE platz_engine)
+target_link_libraries(platz_gpu_checks PRIVATE platz_engine platz_core)
 target_compile_definitions(platz_gpu_checks PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
 add_test(NAME hardware_frame_readback COMMAND platz_gpu_checks)
-set_tests_properties(hardware_frame_readback PROPERTIES LABELS "hardware")
+add_test(NAME hardware_gpu_assisted COMMAND platz_gpu_checks)
+add_test(NAME validation_scene_profile COMMAND platz_gpu_checks --profile "${PROJECT_SOURCE_DIR}/projects/PLATZ Validation.platz")
+set_tests_properties(validation_scene_profile PROPERTIES LABELS "hardware;benchmark" TIMEOUT 60
+    ENVIRONMENT "PLATZ_VK_VALIDATION=0"
+    ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:platz_sdl3>")
+set_tests_properties(hardware_frame_readback hardware_gpu_assisted PROPERTIES LABELS "hardware" TIMEOUT 90)
 
 add_executable(platz_studio_checks studio_checks.cpp)
 target_link_libraries(platz_studio_checks PRIVATE platz_studio Qt6::Test)
@@ -13,5 +18,12 @@ add_test(NAME studio_edit_play_reopen COMMAND platz_studio_checks)
 set_tests_properties(studio_edit_play_reopen PROPERTIES LABELS "hardware;interactive" TIMEOUT 90)
 set_tests_properties(studio_edit_play_reopen PROPERTIES
     ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
+set(all_gpu_checks studio_edit_play_reopen hardware_frame_readback hardware_gpu_assisted)
+set_property(TEST ${all_gpu_checks} APPEND PROPERTY
+    ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:platz_sdl3>")
+set_tests_properties(${all_gpu_checks} PROPERTIES
+    FAIL_REGULAR_EXPRESSION "PLATZ Vulkan ERROR|SYNC-HAZARD|Validation Error:"
+    ENVIRONMENT "PLATZ_VK_VALIDATION=1;VK_LAYER_PATH=${PROJECT_SOURCE_DIR}/.deps/graphics/sdk/Bin;VK_KHRONOS_VALIDATION_VALIDATE_SYNC=true")
+set_property(TEST hardware_gpu_assisted APPEND PROPERTY ENVIRONMENT "VK_KHRONOS_VALIDATION_GPUAV_ENABLE=true")
 set_target_properties(platz_gpu_checks platz_studio_checks PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests/$<CONFIG>")

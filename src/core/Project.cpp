@@ -32,6 +32,8 @@ constexpr const char* objectsSql =
     "mesh TEXT NOT NULL,px REAL NOT NULL,py REAL NOT NULL,pz REAL NOT NULL,rx REAL NOT NULL,ry REAL NOT NULL,"
     "rz REAL NOT NULL,sx REAL NOT NULL,sy REAL NOT NULL,sz REAL NOT NULL,cr REAL NOT NULL,cg REAL NOT NULL,"
     "cb REAL NOT NULL,PRIMARY KEY(rev,seq),UNIQUE(rev,id))";
+constexpr const char* snapshotsSql =
+    "CREATE TABLE snapshots(rev INTEGER PRIMARY KEY,object_count INTEGER NOT NULL CHECK(object_count>=0))";
 
 [[noreturn]] void fail(const std::string& message) { throw std::runtime_error(message); }
 
@@ -171,29 +173,31 @@ void checkFile(const fs::path& path) {
     if (!fs::is_regular_file(path) || fs::file_size(path) > maxFileBytes)
         fail("Select a regular PLATZ project file within the supported 64 MiB limit.");
 }
-struct Metadata { std::string id,scene,name,token; std::uint64_t head; };
+struct Metadata { std::string id,scene,name,token; std::uint64_t head; int version; };
 Metadata readMeta(Database& db) {
     if (scalar(db,"PRAGMA application_id") != applicationId) fail("This file is not a PLATZ project.");
-    if (scalar(db,"PRAGMA user_version") != 1) fail("Unsupported PLATZ project version. Open it with a compatible build.");
+    auto version = scalar(db,"PRAGMA user_version");
+    if (version != 1 && version != 2) fail("Unsupported PLATZ project version. Open it with a compatible build.");
     Statement schema(db,"SELECT name,sql FROM sqlite_schema WHERE sql IS NOT NULL ORDER BY name");
-    if (!schema.row() || schema.str(0) != "objects" || schema.str(1) != objectsSql ||
-        !schema.row() || schema.str(0) != "project" || schema.str(1) != projectSql || schema.row())
-        fail("Unrecognized project schema. The original file was preserved.");
+    auto checkTable = [&](const char* name, const char* definition) {
+        if (!schema.row() || schema.str(0) != name || schema.str(1) != definition)
+            fail("Unrecognized project schema. The original file was preserved.");
+    };
+    checkTable("objects", objectsSql);
+    checkTable("project", projectSql);
+    if (version == 2) checkTable("snapshots", snapshotsSql);
+    if (schema.row()) fail("Unrecognized project schema. The original file was preserved.");
     Statement q(db,"SELECT id,scene,name,token,head FROM project WHERE singleton=1");
     if (!q.row()) fail("Missing project identity.");
     auto head=q.integer(4);
     if (head < 1 || head == std::numeric_limits<std::int64_t>::max()) fail("Invalid source revision.");
-    Metadata meta{q.str(0),q.str(1),q.str(2),q.str(3),static_cast<std::uint64_t>(head)};
+    Metadata meta{q.str(0),q.str(1),q.str(2),q.str(3),static_cast<std::uint64_t>(head),static_cast<int>(version)};
     if (!validId(meta.id) || !validId(meta.scene) || !validId(meta.token) || meta.id == meta.scene)
         fail("Invalid project or scene identity.");
     validateName(meta.name);
     return meta;
 }
-void requireCurrent(const Metadata& meta, const std::string& id, const std::string& token) {
-    if (meta.id != id || meta.token != token)
-        fail("Another editor saved or replaced this project. Reopen it before saving changes.");
-}
-std::vector<Object> readObjects(Database& db, std::uint64_t rev) {
+std::vector<Object> readObjects(Database& db, std::uint64_t rev, int version) {
     Statement q(db,"SELECT id,name,mesh,px,py,pz,rx,ry,rz,sx,sy,sz,cr,cg,cb FROM objects WHERE rev=? ORDER BY seq LIMIT 513");
     q.bind(1,static_cast<std::int64_t>(rev));
     std::vector<Object> result;
@@ -207,10 +211,27 @@ std::vector<Object> readObjects(Database& db, std::uint64_t rev) {
         if (!ids.insert(o.id).second) fail("Duplicate object identity in project.");
         result.push_back(std::move(o));
     }
-    if (result.empty()) fail("Project revision is incomplete.");
+    if (version == 2) {
+        Statement count(db, "SELECT object_count FROM snapshots WHERE rev=?");
+        count.bind(1,static_cast<std::int64_t>(rev));
+        if (!count.row() || count.integer(0) != static_cast<std::int64_t>(result.size()))
+            fail("Project revision is incomplete.");
+    } else if (result.empty()) {
+        fail("Project revision is incomplete.");
+    }
     return result;
 }
+void requireCurrent(Database& db, const Metadata& meta, const Project& project, const std::string& token,
+                    const std::vector<Object>& saved) {
+    if (meta.id != project.id() || meta.scene != project.sceneId() || meta.name != project.name() ||
+        meta.head != project.savedRevision() || meta.token != token || readObjects(db, meta.head, meta.version) != saved)
+        fail("The saved project changed on disk. Reopen it before saving changes.");
+}
 void putObjects(Database& db, const std::vector<Object>& objects, std::uint64_t rev) {
+    Statement snapshot(db,"INSERT INTO snapshots VALUES(?,?)");
+    snapshot.bind(1,static_cast<std::int64_t>(rev));
+    snapshot.bind(2,static_cast<std::int64_t>(objects.size()));
+    snapshot.done();
     Statement ins(db,"INSERT INTO objects VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)");
     for (size_t i=0; i<objects.size(); ++i) {
         auto& o=objects[i];
@@ -284,8 +305,8 @@ Project Project::create(const fs::path& path, const std::string& name) {
     {
         Database db(temp.path,SQLITE_OPEN_READWRITE);
         db.exec("BEGIN IMMEDIATE");
-        db.exec("PRAGMA application_id=0x504C545A; PRAGMA user_version=1");
-        db.exec(projectSql); db.exec(objectsSql);
+        db.exec("PRAGMA application_id=0x504C545A; PRAGMA user_version=2");
+        db.exec(projectSql); db.exec(objectsSql); db.exec(snapshotsSql);
         Statement q(db,"INSERT INTO project VALUES(1,?,?,?,?,?)");
         q.bind(1,p.id_); q.bind(2,p.sceneId_); q.bind(3,name);
         q.bind(4,static_cast<std::int64_t>(p.head_)); q.bind(5,p.diskToken_);
@@ -302,8 +323,9 @@ Project Project::open(const fs::path& path) {
     db.exec("BEGIN");
     auto meta=readMeta(db);
     p.id_=meta.id; p.sceneId_=meta.scene; p.name_=meta.name; p.head_=p.revision_=meta.head;
-    p.diskToken_=meta.token; p.objects_=readObjects(db,meta.head); p.saved_=p.objects_;
-    p.hasPrevious_ = scalar(db,"SELECT count(DISTINCT rev) FROM objects") > 1;
+    p.diskToken_=meta.token; p.objects_=readObjects(db,meta.head,meta.version); p.saved_=p.objects_;
+    p.hasPrevious_ = scalar(db,meta.version == 1 ? "SELECT count(DISTINCT rev) FROM objects" :
+                                                   "SELECT count(*) FROM snapshots") > 1;
     db.exec("COMMIT"); return p;
 }
 const Object* Project::find(const std::string& id) const {
@@ -311,8 +333,15 @@ const Object* Project::find(const std::string& id) const {
     return it == objects_.end() ? nullptr : &*it;
 }
 bool Project::dirty() const { return objects_ != saved_; }
-ObjectEdit Project::stage(const Object& replacement, std::uint64_t expectedRevision) const {
+void Project::requireRevision(std::uint64_t expectedRevision) const {
     if (expectedRevision != revision_) fail("The source revision changed. Review the edit again.");
+}
+void Project::requireRevisionCapacity() const {
+    if (revision_ >= static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())-1)
+        fail("Project revision limit reached.");
+}
+ObjectEdit Project::stage(const Object& replacement, std::uint64_t expectedRevision) const {
+    requireRevision(expectedRevision);
     auto* old=find(replacement.id);
     if (!old) fail("The target object does not exist in this scene.");
     validate(replacement);
@@ -320,8 +349,7 @@ ObjectEdit Project::stage(const Object& replacement, std::uint64_t expectedRevis
 }
 void Project::replace(std::vector<Object> next) {
     if (next == objects_) return;
-    if (revision_ >= static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())-1)
-        fail("Project revision limit reached.");
+    requireRevisionCapacity();
     undo_.push_back(objects_);
     if (undo_.size() > maxUndo) undo_.erase(undo_.begin());
     objects_=std::move(next); redo_.clear(); ++revision_;
@@ -346,32 +374,68 @@ std::string Project::add(Mesh mesh) {
                       {0,0.5f,0},{1,1,1},{0.47f,0.72f,0.68f});
     auto next=objects_; next.push_back(o); replace(std::move(next)); return o.id;
 }
+std::string Project::duplicate(const std::string& objectId, std::uint64_t expectedRevision) {
+    requireRevision(expectedRevision);
+    const Object* source = find(objectId);
+    if (!source) fail("The target object does not exist in this scene.");
+    if (objects_.size() >= maxObjects) fail("This build supports up to 512 scene objects.");
+    Object copy = *source;
+    copy.id = newId();
+    // Reserve five bytes for the suffix, without splitting a UTF-8 character.
+    if (copy.name.size() > 235) {
+        std::size_t end = 235;
+        while ((static_cast<unsigned char>(copy.name[end]) & 0xc0) == 0x80) --end;
+        copy.name.resize(end);
+    }
+    copy.name += " copy";
+    validate(copy);
+    auto next = objects_;
+    next.insert(next.begin() + (source - objects_.data()) + 1, copy);
+    replace(std::move(next));
+    return copy.id;
+}
+void Project::remove(const std::string& objectId, std::uint64_t expectedRevision) {
+    requireRevision(expectedRevision);
+    const Object* source = find(objectId);
+    if (!source) fail("The target object does not exist in this scene.");
+    auto next = objects_;
+    next.erase(next.begin() + (source - objects_.data()));
+    replace(std::move(next));
+}
 void Project::undo() {
     if (!canUndo()) return;
+    requireRevisionCapacity();
     redo_.push_back(objects_); objects_=std::move(undo_.back()); undo_.pop_back(); ++revision_;
 }
 void Project::redo() {
     if (!canRedo()) return;
+    requireRevisionCapacity();
     undo_.push_back(objects_); objects_=std::move(redo_.back()); redo_.pop_back(); ++revision_;
 }
 void Project::restorePrevious() {
     if (!hasPrevious_) fail("This project has no previous saved revision.");
     checkFile(path_); Database db(path_,SQLITE_OPEN_READWRITE);
-    db.exec("BEGIN"); auto meta=readMeta(db); requireCurrent(meta,id_,diskToken_);
-    Statement prev(db,"SELECT MAX(rev) FROM objects WHERE rev < ?");
+    db.exec("BEGIN"); auto meta=readMeta(db); requireCurrent(db,meta,*this,diskToken_,saved_);
+    Statement prev(db,meta.version == 1 ? "SELECT MAX(rev) FROM objects WHERE rev < ?" :
+                                         "SELECT MAX(rev) FROM snapshots WHERE rev < ?");
     prev.bind(1,static_cast<std::int64_t>(head_));
     if (!prev.row()) fail("Previous saved revision unavailable.");
-    auto previous=readObjects(db,prev.integer(0)); db.exec("COMMIT");
+    auto previous=readObjects(db,prev.integer(0),meta.version); db.exec("COMMIT");
     replace(std::move(previous));
 }
 void Project::save() {
     checkFile(path_);
     Database db(path_,SQLITE_OPEN_READWRITE);
     db.exec("BEGIN IMMEDIATE");
-    auto meta=readMeta(db); requireCurrent(meta,id_,diskToken_);
+    auto meta=readMeta(db); requireCurrent(db,meta,*this,diskToken_,saved_);
     if (!dirty()) { db.exec("COMMIT"); return; }
     auto nextToken=newId();
     auto savedCopy=objects_;
+    if (meta.version == 1) {
+        db.exec(snapshotsSql);
+        db.exec("INSERT INTO snapshots SELECT rev,count(*) FROM objects GROUP BY rev");
+        db.exec("PRAGMA user_version=2");
+    }
     putObjects(db,objects_,revision_);
     Statement update(db,"UPDATE project SET head=?,token=? WHERE singleton=1 AND token=?");
     update.bind(1,static_cast<std::int64_t>(revision_)); update.bind(2,nextToken);
@@ -379,6 +443,8 @@ void Project::save() {
     if (sqlite3_changes(db.db) != 1) fail("Project save conflict.");
     Statement prune(db,"DELETE FROM objects WHERE rev < ?");
     prune.bind(1,static_cast<std::int64_t>(head_)); prune.done();
+    Statement pruneSnapshots(db,"DELETE FROM snapshots WHERE rev < ?");
+    pruneSnapshots.bind(1,static_cast<std::int64_t>(head_)); pruneSnapshots.done();
     db.exec("COMMIT");
     head_=revision_; diskToken_=std::move(nextToken); hasPrevious_=true; saved_=std::move(savedCopy);
 }

@@ -60,6 +60,16 @@ void Viewport::fail(const std::exception& error) {
     displayedIds_.clear();
     if (onError) onError(QString::fromUtf8(error.what()));
 }
+QString Viewport::diagnostics() const {
+    return renderer_ ? QString::fromStdString(renderer_->diagnostics()) : tr("Open a project to initialize the GPU.");
+}
+void Viewport::retryRenderer() {
+    renderer_.reset();
+    displayedIds_.clear();
+    surface_ = {};
+    failed_ = false;
+    update();
+}
 void Viewport::paintEvent(QPaintEvent*) {
     if (failed_ || !isVisible() || !width() || !height()) return;
     try {

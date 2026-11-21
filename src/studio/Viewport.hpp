@@ -16,6 +16,8 @@ public:
     void beginPlay();
     void endPlay();
     platz::engine::Capture captureFrame() const;
+    QString diagnostics() const;
+    void retryRenderer();
     QPaintEngine* paintEngine() const override { return nullptr; }
 protected:
     void paintEvent(QPaintEvent*) override;

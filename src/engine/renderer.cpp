@@ -1,13 +1,10 @@
 #include "renderer.hpp"
-#include <windows.h>
-#include <d3d12.h>
-#include <dxgi1_6.h>
+#include "vulkan_device.hpp"
+#include "scene_spv.hpp"
 #include <DirectXMath.h>
-#include <wrl/client.h>
-#include "scene_vs.h"
-#include "scene_ps.h"
-
 #include <algorithm>
+#include <utility>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <iomanip>
@@ -17,61 +14,24 @@
 
 namespace platz::engine {
 using namespace DirectX;
-using Microsoft::WRL::ComPtr;
-
+using namespace gpu;
 namespace {
-constexpr UINT bufferCount = 2;
+using Clock = std::chrono::steady_clock;
 constexpr float fov = XMConvertToRadians(47.f);
-constexpr DXGI_FORMAT colorFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
-constexpr DXGI_FORMAT tokenFormat = DXGI_FORMAT_R32_UINT;
-constexpr DXGI_FORMAT depthFormat = DXGI_FORMAT_D32_FLOAT;
-
-void check(HRESULT result, const char* operation) {
-    if (SUCCEEDED(result)) return;
-    std::ostringstream message;
-    message << operation << " failed (HRESULT 0x" << std::hex << static_cast<unsigned long>(result) << ").";
-    throw std::runtime_error(message.str());
+XMVECTOR vector(Vec3 v) {
+    return XMVectorSet(v[0], v[1], v[2], 0);
 }
-
-XMVECTOR vector(Vec3 v) { return XMVectorSet(v[0], v[1], v[2], 0); }
 XMVECTOR offset(const Camera& camera) {
     float cp = std::cos(camera.pitch);
     return XMVectorSet(std::sin(camera.yaw) * cp, std::sin(camera.pitch), std::cos(camera.yaw) * cp, 0);
 }
 
-D3D12_HEAP_PROPERTIES heap(D3D12_HEAP_TYPE type) {
-    D3D12_HEAP_PROPERTIES value{};
-    value.Type = type;
-    value.CreationNodeMask = value.VisibleNodeMask = 1;
-    return value;
-}
-D3D12_RESOURCE_DESC bufferDesc(UINT64 bytes) {
-    D3D12_RESOURCE_DESC d{};
-    d.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-    d.Width = bytes;
-    d.Height = d.DepthOrArraySize = d.MipLevels = d.SampleDesc.Count = 1;
-    d.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-    return d;
-}
-ComPtr<ID3D12Resource> makeBuffer(ID3D12Device* device, UINT64 bytes, D3D12_HEAP_TYPE type,
-                                  D3D12_RESOURCE_STATES state) {
-    auto properties = heap(type);
-    auto desc = bufferDesc(bytes);
-    ComPtr<ID3D12Resource> result;
-    check(device->CreateCommittedResource(&properties, D3D12_HEAP_FLAG_NONE, &desc, state, nullptr,
-                                          IID_PPV_ARGS(&result)), "Allocating GPU buffer");
-    return result;
-}
-void transition(ID3D12GraphicsCommandList* list, ID3D12Resource* resource,
-                D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after) {
-    D3D12_RESOURCE_BARRIER b{};
-    b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    b.Transition = {resource, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, before, after};
-    list->ResourceBarrier(1, &b);
-}
-
-struct Vertex { XMFLOAT3 position, normal; };
-struct MeshRange { UINT startIndex, count; };
+struct Vertex {
+    XMFLOAT3 position, normal;
+};
+struct MeshRange {
+    UINT startIndex, count;
+};
 struct Geometry {
     std::vector<Vertex> vertices;
     std::vector<std::uint32_t> indices;
@@ -94,14 +54,15 @@ Geometry makeGeometry() {
     for (unsigned axis = 0; axis < 3; ++axis) {
         for (float sign : {-1.f, 1.f}) {
             UINT first = static_cast<UINT>(g.vertices.size());
-            for (auto corner : std::array<std::array<float,2>,4>{{{-1,-1},{1,-1},{1,1},{-1,1}}}) {
+            for (auto corner : std::array<std::array<float, 2>, 4>{{{-1, -1}, {1, -1}, {1, 1}, {-1, 1}}}) {
                 Vec3 p{}, n{};
-                p[axis] = sign * .5f; n[axis] = sign;
-                p[(axis+1)%3] = corner[0] * .5f;
-                p[(axis+2)%3] = corner[1] * .5f;
-                g.vertex({p[0],p[1],p[2]}, {n[0],n[1],n[2]});
+                p[axis] = sign * .5f;
+                n[axis] = sign;
+                p[(axis + 1) % 3] = corner[0] * .5f;
+                p[(axis + 2) % 3] = corner[1] * .5f;
+                g.vertex({p[0], p[1], p[2]}, {n[0], n[1], n[2]});
             }
-            g.quad(first, first+1, first+2, first+3);
+            g.quad(first, first + 1, first + 2, first + 3);
         }
     }
     g.finish(0, 0);
@@ -112,37 +73,38 @@ Geometry makeGeometry() {
         float theta = XM_PI * static_cast<float>(y) / rings;
         for (unsigned x = 0; x <= segments; ++x) {
             float phi = XM_2PI * static_cast<float>(x) / segments;
-            XMFLOAT3 n{std::sin(theta)*std::cos(phi), std::cos(theta), std::sin(theta)*std::sin(phi)};
-            g.vertex({n.x*.5f,n.y*.5f,n.z*.5f}, n);
+            XMFLOAT3 n{std::sin(theta) * std::cos(phi), std::cos(theta), std::sin(theta) * std::sin(phi)};
+            g.vertex({n.x * .5f, n.y * .5f, n.z * .5f}, n);
             if (x && y) {
-                UINT i = base + y*(segments+1)+x;
-                g.quad(i-segments-2, i-1, i, i-segments-1);
+                UINT i = base + y * (segments + 1) + x;
+                g.quad(i - segments - 2, i - 1, i, i - segments - 1);
             }
         }
     }
     g.finish(1, start);
     start = static_cast<UINT>(g.indices.size());
     for (unsigned i = 0; i < segments; ++i) {
-        float a = XM_2PI * i / segments, b = XM_2PI * (i+1) / segments;
-        XMFLOAT3 n1{std::cos(a),0,std::sin(a)}, n2{std::cos(b),0,std::sin(b)};
-        XMFLOAT3 bottom1{n1.x*.5f,-.5f,n1.z*.5f}, top1{bottom1.x,.5f,bottom1.z};
-        XMFLOAT3 bottom2{n2.x*.5f,-.5f,n2.z*.5f}, top2{bottom2.x,.5f,bottom2.z};
-        UINT p1=g.vertex(bottom1,n1), p2=g.vertex(top1,n1), p3=g.vertex(top2,n2), p4=g.vertex(bottom2,n2);
-        g.quad(p1,p2,p3,p4);
-        for (float y : {-.5f,.5f}) {
-            XMFLOAT3 n{0,y*2,0};
-            UINT center=g.vertex({0,y,0},n);
-            UINT edge1=g.vertex({bottom1.x,y,bottom1.z},n), edge2=g.vertex({bottom2.x,y,bottom2.z},n);
-            g.indices.insert(g.indices.end(), {center,edge1,edge2});
+        float a = XM_2PI * i / segments, b = XM_2PI * (i + 1) / segments;
+        XMFLOAT3 n1{std::cos(a), 0, std::sin(a)}, n2{std::cos(b), 0, std::sin(b)};
+        XMFLOAT3 bottom1{n1.x * .5f, -.5f, n1.z * .5f}, top1{bottom1.x, .5f, bottom1.z};
+        XMFLOAT3 bottom2{n2.x * .5f, -.5f, n2.z * .5f}, top2{bottom2.x, .5f, bottom2.z};
+        UINT p1 = g.vertex(bottom1, n1), p2 = g.vertex(top1, n1), p3 = g.vertex(top2, n2),
+             p4 = g.vertex(bottom2, n2);
+        g.quad(p1, p2, p3, p4);
+        for (float y : {-.5f, .5f}) {
+            XMFLOAT3 n{0, y * 2, 0};
+            UINT center = g.vertex({0, y, 0}, n);
+            UINT edge1 = g.vertex({bottom1.x, y, bottom1.z}, n), edge2 = g.vertex({bottom2.x, y, bottom2.z}, n);
+            g.indices.insert(g.indices.end(), {center, edge1, edge2});
         }
     }
     g.finish(2, start);
     start = static_cast<UINT>(g.indices.size());
     base = static_cast<UINT>(g.vertices.size());
-    for (auto p : std::array<XMFLOAT3,4>{{{-1,0,-1},{1,0,-1},{1,0,1},{-1,0,1}}})
-        g.vertex(p, {0,1,0});
-    g.quad(base,base+1,base+2,base+3);
-    g.finish(3,start);
+    for (auto p : std::array<XMFLOAT3, 4>{{{-1, 0, -1}, {1, 0, -1}, {1, 0, 1}, {-1, 0, 1}}})
+        g.vertex(p, {0, 1, 0});
+    g.quad(base, base + 1, base + 2, base + 3);
+    g.finish(3, start);
     return g;
 }
 
@@ -156,365 +118,719 @@ struct Constants {
 };
 static_assert(sizeof(Constants) == 57 * 4);
 
-std::string utf8(const wchar_t* value) {
-    int size = WideCharToMultiByte(CP_UTF8, 0, value, -1, nullptr, 0, nullptr, nullptr);
-    std::string result(size, '\0');
-    WideCharToMultiByte(CP_UTF8, 0, value, -1, result.data(), size, nullptr, nullptr);
-    if (!result.empty()) result.pop_back();
-    return result;
-}
-}
-
+} // namespace
 void Camera::orbit(float dx, float dy) {
-    yaw = std::remainder(yaw - dx*.006f, XM_2PI);
-    pitch = std::clamp(pitch + dy*.006f, -1.50f, 1.50f);
+    yaw = std::remainder(yaw - dx * .006f, XM_2PI);
+    pitch = std::clamp(pitch + dy * .006f, -1.50f, 1.50f);
 }
 void Camera::zoom(float steps) {
-    distance = std::clamp(distance * std::exp(-steps*.14f), .22f, 650.f);
+    distance = std::clamp(distance * std::exp(-steps * .14f), .22f, 650.f);
 }
 void Camera::move(float right, float up, float forward) {
-    target[0] += std::cos(yaw)*right - std::sin(yaw)*forward;
+    target[0] += std::cos(yaw) * right - std::sin(yaw) * forward;
     target[1] += up;
-    target[2] += -std::sin(yaw)*right - std::cos(yaw)*forward;
+    target[2] += -std::sin(yaw) * right - std::cos(yaw) * forward;
 }
 void Camera::pan(float dx, float dy, float height) {
-    float units = 2 * distance * std::tan(fov/2) / std::max(height, 1.f);
-    move(-dx*units, dy*units*std::cos(pitch), dy*units*std::sin(pitch));
+    float units = 2 * distance * std::tan(fov / 2) / std::max(height, 1.f);
+    move(-dx * units, dy * units * std::cos(pitch), dy * units * std::sin(pitch));
 }
 void Camera::frame(Vec3 center, Vec3 dimensions) {
     target = center;
     distance = std::clamp(XMVectorGetX(XMVector3Length(vector(dimensions))) * 1.45f, .5f, 650.f);
 }
 
-struct Renderer::Impl {
-    struct Frame {
-        ComPtr<ID3D12CommandAllocator> allocator;
-        ComPtr<ID3D12Resource> back;
-        UINT64 finished{};
-    };
-    std::array<Frame, bufferCount> frames;
-    ComPtr<ID3D12Device> device;
-    ComPtr<ID3D12CommandQueue> queue;
-    ComPtr<IDXGISwapChain3> swap;
-    ComPtr<ID3D12Fence> fence;
-    ComPtr<ID3D12GraphicsCommandList> list;
-    ComPtr<ID3D12CommandAllocator> auxiliary;
-    ComPtr<ID3D12RootSignature> root;
-    ComPtr<ID3D12PipelineState> pipeline;
-    ComPtr<ID3D12DescriptorHeap> rtvs, dsv;
-    ComPtr<ID3D12Resource> color, ids, depth, geometry;
-    D3D12_VERTEX_BUFFER_VIEW vb{};
-    D3D12_INDEX_BUFFER_VIEW ib{};
-    std::array<MeshRange,4> ranges{};
-    HANDLE event{};
-    UINT64 serial{};
-    UINT width{}, height{}, rtvStep{};
-    std::string adapterName;
-    bool drawn{};
+namespace {
+constexpr uint32_t framesInFlight = 2;
+constexpr VkFormat idFormat = VK_FORMAT_R32_UINT, depthFormat = VK_FORMAT_D32_SFLOAT;
+constexpr uint64_t timeout = 10'000'000'000ull;
 
-    ~Impl() {
-        if (queue && fence && event) {
-            try { wait(signal()); } catch (...) {}
-        }
-        if (event) CloseHandle(event);
-    }
-    UINT64 signal() {
-        check(queue->Signal(fence.Get(), ++serial), "Signaling the GPU");
-        return serial;
-    }
-    void wait(UINT64 value) {
-        auto completed = fence->GetCompletedValue();
-        if (completed == UINT64_MAX) check(device->GetDeviceRemovedReason(), "GPU was removed");
-        if (completed >= value) return;
-        check(fence->SetEventOnCompletion(value, event), "Waiting for the GPU");
-        if (WaitForSingleObject(event, 10000) != WAIT_OBJECT_0)
-            throw std::runtime_error("The graphics adapter did not complete this operation within 10 seconds.");
-        if (fence->GetCompletedValue() == UINT64_MAX) check(device->GetDeviceRemovedReason(), "GPU was removed");
-    }
-    void begin(ID3D12CommandAllocator* allocator) {
-        check(allocator->Reset(), "Resetting GPU frame memory");
-        check(list->Reset(allocator, nullptr), "Recording GPU commands");
-    }
-    void execute() {
-        check(list->Close(), "Closing GPU commands");
-        ID3D12CommandList* batch[] = {list.Get()};
-        queue->ExecuteCommandLists(1, batch);
-    }
-    D3D12_CPU_DESCRIPTOR_HANDLE rtv(UINT index) const {
-        auto result = rtvs->GetCPUDescriptorHandleForHeapStart();
-        result.ptr += static_cast<SIZE_T>(index)*rtvStep;
-        return result;
-    }
-    void initialize(HWND window);
-    void makePipeline();
-    void uploadGeometry();
-    void targets(UINT w,UINT h);
-    void draw(std::span<const DrawObject>, const Camera&, UINT);
-    Capture read(UINT x,UINT y,UINT w,UINT h,bool withColor);
+void imageBarrier(VkCommandBuffer cmd, VkImage image, VkImageAspectFlags aspect, VkImageLayout oldLayout,
+                  VkImageLayout newLayout, VkPipelineStageFlags2 source, VkAccessFlags2 reads,
+                  VkPipelineStageFlags2 destination, VkAccessFlags2 writes) {
+    VkImageMemoryBarrier2 b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
+    b.srcStageMask = source;
+    b.srcAccessMask = reads;
+    b.dstStageMask = destination;
+    b.dstAccessMask = writes;
+    b.oldLayout = oldLayout;
+    b.newLayout = newLayout;
+    b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    b.image = image;
+    b.subresourceRange = {aspect, 0, 1, 0, 1};
+    VkDependencyInfo d{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+    d.imageMemoryBarrierCount = 1;
+    d.pImageMemoryBarriers = &b;
+    vkCmdPipelineBarrier2(cmd, &d);
+}
+void startCommands(VkDevice device, VkCommandPool pool, VkCommandBuffer cmd) {
+    check(vkResetCommandPool(device, pool, 0), "Recycling completed frame commands");
+    VkCommandBufferBeginInfo start{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    start.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    check(vkBeginCommandBuffer(cmd, &start), "Recording Vulkan commands");
+}
+void makeCommands(Device& d, VkCommandPool& pool, VkCommandBuffer& cmd, VkFence& fence) {
+    VkCommandPoolCreateInfo pc{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+    pc.queueFamilyIndex = d.family;
+    pc.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+    check(vkCreateCommandPool(d.device, &pc, nullptr, &pool), "Creating command pool");
+    VkCommandBufferAllocateInfo ac{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+    ac.commandPool = pool;
+    ac.commandBufferCount = 1;
+    check(vkAllocateCommandBuffers(d.device, &ac, &cmd), "Allocating command buffer");
+    VkFenceCreateInfo fc{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+    fc.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+    check(vkCreateFence(d.device, &fc, nullptr, &fence), "Creating completion fence");
+}
+struct Frame {
+    VkCommandPool pool{};
+    VkCommandBuffer cmd{};
+    VkFence fence{};
+    VkSemaphore acquired{};
+    VkDescriptorSet constants{};
+    VkQueryPool timing{};
+    Buffer uniforms;
+    Image color, ids, depth;
+    bool rendered{};
+};
+struct PresentImage {
+    VkImage image{};
+    VkSemaphore finished{};
+};
+} // namespace
+struct Renderer::Impl {
+    Device d; // Outlives every buffer, image and in-flight frame.
+    std::array<Frame, framesInFlight> frames;
+    uint32_t current{}, last{}, frameNumber{};
+    VkDescriptorSetLayout binding{};
+    VkDescriptorPool descriptors{};
+    VkPipelineLayout layout{};
+    VkPipeline pipeline{}, ground{};
+    VkCommandPool transferPool{};
+    VkCommandBuffer transferCmd{};
+    VkFence transferFence{};
+    Buffer geometry, readback;
+    VkDeviceSize indexOffset{}, stride{};
+    std::array<MeshRange, 4> ranges{};
+    VkSwapchainKHR chain{};
+    std::vector<PresentImage> images;
+    VkExtent2D extent{}, requested{};
+    VkFormat format{};
+    bool pendingResize{}, drawn{};
+    double cpuMs{}, gpuMs{}, pipelineMs{};
+    VkDeviceSize attachmentBytes{}, peakAttachmentBytes{}, maxViewportBytes{};
+    void open(HWND);
+    void rebuild();
+    void releaseSwap();
+    void makePipelines();
+    void upload();
+    void finishTransfer();
+    void prepare(Frame&, std::span<const DrawObject>, const Camera&, uint32_t);
+    void record(Frame&, std::span<const DrawObject>, uint32_t);
+    void draw(std::span<const DrawObject>, const Camera&, uint32_t);
+    Capture read(uint32_t, uint32_t, uint32_t, uint32_t, bool);
+    ~Impl();
 };
 
-void Renderer::Impl::initialize(HWND window) {
-    if (!IsWindow(window)) throw std::invalid_argument("The viewport requires a valid native window.");
-    ComPtr<IDXGIFactory6> factory;
-    check(CreateDXGIFactory2(0, IID_PPV_ARGS(&factory)), "Opening DXGI");
-    for (UINT i=0;; ++i) {
-        ComPtr<IDXGIAdapter1> adapter;
-        HRESULT result = factory->EnumAdapterByGpuPreference(i, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE,
-                                                             IID_PPV_ARGS(&adapter));
-        if (result == DXGI_ERROR_NOT_FOUND) break;
-        check(result, "Enumerating hardware adapters");
-        DXGI_ADAPTER_DESC1 desc{};
-        check(adapter->GetDesc1(&desc), "Querying graphics adapter");
-        if (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) continue;
-        if (FAILED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_12_0, IID_PPV_ARGS(&device)))) continue;
-        D3D12_FEATURE_DATA_SHADER_MODEL model{D3D_SHADER_MODEL_6_0};
-        if (FAILED(device->CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL, &model, sizeof(model))) ||
-            model.HighestShaderModel < D3D_SHADER_MODEL_6_0) {
-            device.Reset();
-            continue;
+void Renderer::Impl::open(HWND hwnd) {
+    d.open(hwnd);
+    const auto alignment = d.properties.limits.minUniformBufferOffsetAlignment;
+    stride = (shaders::sceneSize + alignment - 1) / alignment * alignment;
+    VkDescriptorSetLayoutBinding uniform{};
+    uniform.binding = shaders::sceneBinding;
+    uniform.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+    uniform.descriptorCount = 1;
+    uniform.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+    VkDescriptorSetLayoutCreateInfo bc{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    bc.bindingCount = 1;
+    bc.pBindings = &uniform;
+    check(vkCreateDescriptorSetLayout(d.device, &bc, nullptr, &binding), "Creating scene parameter binding");
+    VkPipelineLayoutCreateInfo lc{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    lc.setLayoutCount = 1;
+    lc.pSetLayouts = &binding;
+    check(vkCreatePipelineLayout(d.device, &lc, nullptr, &layout), "Creating material parameter layout");
+    VkDescriptorPoolSize size{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, framesInFlight};
+    VkDescriptorPoolCreateInfo dc{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    dc.maxSets = framesInFlight;
+    dc.poolSizeCount = 1;
+    dc.pPoolSizes = &size;
+    check(vkCreateDescriptorPool(d.device, &dc, nullptr, &descriptors), "Creating frame descriptors");
+    VkSemaphoreCreateInfo sc{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+    for (auto& f : frames) {
+        makeCommands(d, f.pool, f.cmd, f.fence);
+        check(vkCreateSemaphore(d.device, &sc, nullptr, &f.acquired), "Creating image-acquired semaphore");
+        VkDescriptorSetAllocateInfo ac{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+        ac.descriptorPool = descriptors;
+        ac.descriptorSetCount = 1;
+        ac.pSetLayouts = &binding;
+        check(vkAllocateDescriptorSets(d.device, &ac, &f.constants), "Allocating frame parameter set");
+        if (d.timestampBits) {
+            VkQueryPoolCreateInfo qc{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+            qc.queryType = VK_QUERY_TYPE_TIMESTAMP;
+            qc.queryCount = 2;
+            check(vkCreateQueryPool(d.device, &qc, nullptr, &f.timing), "Allocating GPU timestamps");
         }
-        adapterName = utf8(desc.Description);
-        break;
     }
-    if (!device) throw std::runtime_error("PLATZ requires a hardware Direct3D 12 adapter with feature level 12.0 and Shader Model 6.0.");
-    D3D12_COMMAND_QUEUE_DESC queueDesc{};
-    check(device->CreateCommandQueue(&queueDesc,IID_PPV_ARGS(&queue)), "Creating graphics queue");
-    for (auto& frame : frames)
-        check(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,IID_PPV_ARGS(&frame.allocator)), "Allocating frame commands");
-    check(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,IID_PPV_ARGS(&auxiliary)), "Allocating transfer commands");
-    check(device->CreateCommandList(0,D3D12_COMMAND_LIST_TYPE_DIRECT,auxiliary.Get(),nullptr,IID_PPV_ARGS(&list)), "Creating graphics command list");
-    check(list->Close(), "Initializing command list");
-    check(device->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&fence)), "Creating GPU fence");
-    event = CreateEventW(nullptr,FALSE,FALSE,nullptr);
-    if (!event) throw std::runtime_error("Cannot create the GPU completion event.");
-
+    makeCommands(d, transferPool, transferCmd, transferFence);
+    upload();
     RECT rect{};
-    GetClientRect(window,&rect);
-    width = std::max(1L,rect.right);
-    height = std::max(1L,rect.bottom);
-    DXGI_SWAP_CHAIN_DESC1 chain{};
-    chain.Width=width; chain.Height=height; chain.Format=colorFormat; chain.SampleDesc.Count=1;
-    chain.BufferCount=bufferCount; chain.BufferUsage=DXGI_USAGE_RENDER_TARGET_OUTPUT;
-    chain.SwapEffect=DXGI_SWAP_EFFECT_FLIP_DISCARD;
-    ComPtr<IDXGISwapChain1> initial;
-    check(factory->CreateSwapChainForHwnd(queue.Get(),window,&chain,nullptr,nullptr,&initial), "Creating viewport swapchain");
-    check(initial.As(&swap), "Opening flip-model swapchain");
-    check(factory->MakeWindowAssociation(window,DXGI_MWA_NO_ALT_ENTER), "Configuring viewport");
-    D3D12_DESCRIPTOR_HEAP_DESC descriptors{};
-    descriptors.Type=D3D12_DESCRIPTOR_HEAP_TYPE_RTV; descriptors.NumDescriptors=2;
-    check(device->CreateDescriptorHeap(&descriptors,IID_PPV_ARGS(&rtvs)), "Creating render-target descriptors");
-    rtvStep=device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
-    descriptors.Type=D3D12_DESCRIPTOR_HEAP_TYPE_DSV; descriptors.NumDescriptors=1;
-    check(device->CreateDescriptorHeap(&descriptors,IID_PPV_ARGS(&dsv)), "Creating depth descriptor");
-    makePipeline();
-    uploadGeometry();
-    targets(width,height);
+    GetClientRect(hwnd, &rect);
+    requested = {static_cast<uint32_t>(std::max<LONG>(1, rect.right)),
+                 static_cast<uint32_t>(std::max<LONG>(1, rect.bottom))};
+    rebuild();
 }
-
-void Renderer::Impl::makePipeline() {
-    D3D12_ROOT_PARAMETER param{};
-    param.ParameterType=D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-    param.Constants.Num32BitValues=sizeof(Constants)/4;
-    param.ShaderVisibility=D3D12_SHADER_VISIBILITY_ALL;
-    D3D12_ROOT_SIGNATURE_DESC signature{};
-    signature.NumParameters=1; signature.pParameters=&param;
-    signature.Flags=D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
-    ComPtr<ID3DBlob> blob, error;
-    check(D3D12SerializeRootSignature(&signature,D3D_ROOT_SIGNATURE_VERSION_1,&blob,&error), "Serializing root signature");
-    check(device->CreateRootSignature(0,blob->GetBufferPointer(),blob->GetBufferSize(),IID_PPV_ARGS(&root)), "Creating root signature");
-    const D3D12_INPUT_ELEMENT_DESC input[] = {
-        {"POSITION",0,DXGI_FORMAT_R32G32B32_FLOAT,0,0,D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,0},
-        {"NORMAL",0,DXGI_FORMAT_R32G32B32_FLOAT,0,12,D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,0}
-    };
-    D3D12_GRAPHICS_PIPELINE_STATE_DESC pso{};
-    pso.pRootSignature=root.Get(); pso.InputLayout={input,2};
-    pso.VS={scene_vs,sizeof(scene_vs)}; pso.PS={scene_ps,sizeof(scene_ps)};
-    pso.PrimitiveTopologyType=D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-    pso.RasterizerState.FillMode=D3D12_FILL_MODE_SOLID;
-    pso.RasterizerState.CullMode=D3D12_CULL_MODE_NONE;
-    pso.RasterizerState.DepthClipEnable=TRUE;
-    pso.BlendState.IndependentBlendEnable=TRUE;
-    for (UINT i=0;i<2;++i) {
-        auto& blend=pso.BlendState.RenderTarget[i];
-        blend.SrcBlend=blend.SrcBlendAlpha=D3D12_BLEND_ONE;
-        blend.DestBlend=blend.DestBlendAlpha=D3D12_BLEND_ZERO;
-        blend.BlendOp=blend.BlendOpAlpha=D3D12_BLEND_OP_ADD;
-        blend.LogicOp=D3D12_LOGIC_OP_NOOP;
-        blend.RenderTargetWriteMask=D3D12_COLOR_WRITE_ENABLE_ALL;
+Renderer::Impl::~Impl() {
+    if (!d.device)
+        return;
+    vkDeviceWaitIdle(d.device);
+    releaseSwap();
+    for (auto& f : frames) {
+        if (f.timing)
+            vkDestroyQueryPool(d.device, f.timing, nullptr);
+        if (f.acquired)
+            vkDestroySemaphore(d.device, f.acquired, nullptr);
+        if (f.fence)
+            vkDestroyFence(d.device, f.fence, nullptr);
+        if (f.pool)
+            vkDestroyCommandPool(d.device, f.pool, nullptr);
     }
-    pso.DepthStencilState.DepthEnable=TRUE;
-    pso.DepthStencilState.DepthWriteMask=D3D12_DEPTH_WRITE_MASK_ALL;
-    pso.DepthStencilState.DepthFunc=D3D12_COMPARISON_FUNC_LESS;
-    pso.SampleMask=UINT_MAX; pso.SampleDesc.Count=1; pso.NumRenderTargets=2;
-    pso.RTVFormats[0]=colorFormat; pso.RTVFormats[1]=tokenFormat; pso.DSVFormat=depthFormat;
-    check(device->CreateGraphicsPipelineState(&pso,IID_PPV_ARGS(&pipeline)), "Compiling native graphics pipeline");
+    if (transferFence)
+        vkDestroyFence(d.device, transferFence, nullptr);
+    if (transferPool)
+        vkDestroyCommandPool(d.device, transferPool, nullptr);
+    if (pipeline)
+        vkDestroyPipeline(d.device, pipeline, nullptr);
+    if (ground)
+        vkDestroyPipeline(d.device, ground, nullptr);
+    if (layout)
+        vkDestroyPipelineLayout(d.device, layout, nullptr);
+    if (descriptors)
+        vkDestroyDescriptorPool(d.device, descriptors, nullptr);
+    if (binding)
+        vkDestroyDescriptorSetLayout(d.device, binding, nullptr);
+}
+void Renderer::Impl::finishTransfer() {
+    check(vkEndCommandBuffer(transferCmd), "Closing transfer commands");
+    VkCommandBufferSubmitInfo cmd{VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO};
+    cmd.commandBuffer = transferCmd;
+    VkSubmitInfo2 submit{VK_STRUCTURE_TYPE_SUBMIT_INFO_2};
+    submit.commandBufferInfoCount = 1;
+    submit.pCommandBufferInfos = &cmd;
+    check(vkResetFences(d.device, 1, &transferFence), "Resetting transfer completion");
+    check(vkQueueSubmit2(d.queue, 1, &submit, transferFence), "Submitting GPU transfer");
+    check(vkWaitForFences(d.device, 1, &transferFence, VK_TRUE, timeout), "Waiting for GPU transfer");
+}
+void Renderer::Impl::upload() {
+    auto source = makeGeometry();
+    ranges = source.ranges;
+    indexOffset = source.vertices.size() * sizeof(Vertex);
+    VkDeviceSize bytes = indexOffset + source.indices.size() * sizeof(uint32_t);
+    geometry = d.buffer(bytes,
+                        VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
+                            VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+                        MemoryIntent::Mesh, "Primitive mesh atlas");
+    auto staging = d.buffer(bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, MemoryIntent::Upload, "Mesh upload");
+    std::memcpy(staging.mapped, source.vertices.data(), indexOffset);
+    std::memcpy(static_cast<std::byte*>(staging.mapped) + indexOffset, source.indices.data(),
+                bytes - indexOffset);
+    check(vmaFlushAllocation(d.allocator, staging.allocation, 0, VK_WHOLE_SIZE), "Flushing mesh upload");
+    startCommands(d.device, transferPool, transferCmd);
+    VkBufferCopy copy{0, 0, bytes};
+    vkCmdCopyBuffer(transferCmd, staging.handle, geometry.handle, 1, &copy);
+    VkBufferMemoryBarrier2 b{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2};
+    b.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+    b.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    b.dstStageMask = VK_PIPELINE_STAGE_2_INDEX_INPUT_BIT | VK_PIPELINE_STAGE_2_VERTEX_ATTRIBUTE_INPUT_BIT;
+    b.dstAccessMask = VK_ACCESS_2_INDEX_READ_BIT | VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT;
+    b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    b.buffer = geometry.handle;
+    b.size = VK_WHOLE_SIZE;
+    VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+    dep.bufferMemoryBarrierCount = 1;
+    dep.pBufferMemoryBarriers = &b;
+    vkCmdPipelineBarrier2(transferCmd, &dep);
+    finishTransfer();
+}
+void Renderer::Impl::releaseSwap() {
+    for (auto& image : images)
+        if (image.finished)
+            vkDestroySemaphore(d.device, image.finished, nullptr);
+    images.clear();
+    for (auto& f : frames) {
+        f.color = {};
+        f.ids = {};
+        f.depth = {};
+        f.rendered = false;
+    }
+    if (chain)
+        vkDestroySwapchainKHR(d.device, chain, nullptr);
+    chain = {};
+    drawn = false;
+    attachmentBytes = 0;
+}
+void Renderer::Impl::rebuild() {
+    // Only resize/teardown drain the presentation queue. Normal frame reuse waits its own fence.
+    check(vkQueueWaitIdle(d.queue), "Retiring the previous viewport");
+    releaseSwap();
+    pendingResize = false;
+    if (!requested.width || !requested.height)
+        return;
+    VkSurfaceCapabilitiesKHR caps{};
+    check(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(d.physical, d.surface, &caps), "Reading surface extent");
+    extent = caps.currentExtent;
+    if (extent.width == UINT32_MAX) {
+        extent.width = std::clamp(requested.width, caps.minImageExtent.width, caps.maxImageExtent.width);
+        extent.height = std::clamp(requested.height, caps.minImageExtent.height, caps.maxImageExtent.height);
+    }
+    if (!extent.width || !extent.height) {
+        pendingResize = true;
+        return;
+    }
+    uint32_t count{};
+    check(vkGetPhysicalDeviceSurfaceFormatsKHR(d.physical, d.surface, &count, nullptr),
+          "Counting surface formats");
+    std::vector<VkSurfaceFormatKHR> formats(count);
+    check(vkGetPhysicalDeviceSurfaceFormatsKHR(d.physical, d.surface, &count, formats.data()),
+          "Reading surface formats");
+    auto compatible = std::find_if(formats.begin(), formats.end(), [&](auto s) {
+        if (s.colorSpace != VK_COLOR_SPACE_SRGB_NONLINEAR_KHR ||
+            (s.format != VK_FORMAT_B8G8R8A8_UNORM && s.format != VK_FORMAT_R8G8B8A8_UNORM))
+            return false;
+        VkFormatProperties p{};
+        vkGetPhysicalDeviceFormatProperties(d.physical, s.format, &p);
+        auto flags = VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT | VK_FORMAT_FEATURE_TRANSFER_SRC_BIT;
+        return (p.optimalTilingFeatures & flags) == flags;
+    });
+    if (compatible == formats.end())
+        throw std::runtime_error("This display lacks a qualified 8-bit SDR presentation format.");
+    const bool changed = format != compatible->format;
+    format = compatible->format;
+    uint32_t imageCount = std::max(caps.minImageCount + 1, framesInFlight);
+    if (caps.maxImageCount)
+        imageCount = std::min(imageCount, caps.maxImageCount);
+    const uint64_t pixels = uint64_t(extent.width) * extent.height;
+    if (pixels * (framesInFlight * 12ull + imageCount * 4ull) > std::min(d.viewportBudget(), maxViewportBytes))
+        throw std::runtime_error(
+            "The viewport exceeds its graphics-memory budget. Reduce the window size or free GPU memory.");
+    VkSwapchainCreateInfoKHR ci{VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR};
+    ci.surface = d.surface;
+    ci.minImageCount = imageCount;
+    ci.imageFormat = format;
+    ci.imageColorSpace = compatible->colorSpace;
+    ci.imageExtent = extent;
+    ci.imageArrayLayers = 1;
+    ci.imageUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    ci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    ci.preTransform = caps.currentTransform;
+    ci.compositeAlpha = static_cast<VkCompositeAlphaFlagBitsKHR>(caps.supportedCompositeAlpha &
+                                                                 (~caps.supportedCompositeAlpha + 1u));
+    ci.presentMode = VK_PRESENT_MODE_FIFO_KHR;
+    ci.clipped = VK_TRUE;
+    check(vkCreateSwapchainKHR(d.device, &ci, nullptr, &chain), "Creating FIFO viewport swapchain");
+    check(vkGetSwapchainImagesKHR(d.device, chain, &count, nullptr), "Counting presentation images");
+    std::vector<VkImage> native(count);
+    check(vkGetSwapchainImagesKHR(d.device, chain, &count, native.data()), "Reading presentation images");
+    images.resize(count);
+    VkSemaphoreCreateInfo sc{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+    for (uint32_t i = 0; i < count; ++i) {
+        images[i].image = native[i];
+        check(vkCreateSemaphore(d.device, &sc, nullptr, &images[i].finished),
+              "Creating per-image presentation semaphore");
+    }
+    for (auto& f : frames) {
+        const auto usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+        f.color = d.image(extent, format, usage, VK_IMAGE_ASPECT_COLOR_BIT, "Viewport display color");
+        f.ids = d.image(extent, idFormat, usage, VK_IMAGE_ASPECT_COLOR_BIT, "Scene identity attachment");
+        f.depth = d.image(extent, depthFormat, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+                          VK_IMAGE_ASPECT_DEPTH_BIT, "Scene depth");
+    }
+    attachmentBytes = pixels * framesInFlight * 12ull;
+    peakAttachmentBytes = std::max(attachmentBytes, peakAttachmentBytes);
+    if (changed || !pipeline)
+        makePipelines();
 }
 
-void Renderer::Impl::uploadGeometry() {
-    auto source=makeGeometry();
-    ranges=source.ranges;
-    UINT vertexBytes=static_cast<UINT>(source.vertices.size()*sizeof(Vertex));
-    UINT indexBytes=static_cast<UINT>(source.indices.size()*sizeof(UINT));
-    UINT bytes=vertexBytes+indexBytes;
-    auto upload=makeBuffer(device.Get(),bytes,D3D12_HEAP_TYPE_UPLOAD,D3D12_RESOURCE_STATE_GENERIC_READ);
-    geometry=makeBuffer(device.Get(),bytes,D3D12_HEAP_TYPE_DEFAULT,D3D12_RESOURCE_STATE_COPY_DEST);
-    std::uint8_t* mapped{};
-    D3D12_RANGE noRead{0,0};
-    check(upload->Map(0,&noRead,reinterpret_cast<void**>(&mapped)), "Mapping mesh upload");
-    std::memcpy(mapped,source.vertices.data(),vertexBytes);
-    std::memcpy(mapped+vertexBytes,source.indices.data(),indexBytes);
-    upload->Unmap(0,nullptr);
-    begin(auxiliary.Get());
-    list->CopyBufferRegion(geometry.Get(),0,upload.Get(),0,bytes);
-    transition(list.Get(),geometry.Get(),D3D12_RESOURCE_STATE_COPY_DEST,
-               D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER | D3D12_RESOURCE_STATE_INDEX_BUFFER);
-    execute(); wait(signal());
-    vb={geometry->GetGPUVirtualAddress(),vertexBytes,sizeof(Vertex)};
-    ib={vb.BufferLocation+vertexBytes,indexBytes,DXGI_FORMAT_R32_UINT};
-}
-
-void Renderer::Impl::targets(UINT w, UINT h) {
-    wait(signal());
-    for (auto& frame:frames) frame.back.Reset();
-    color.Reset(); ids.Reset(); depth.Reset(); drawn=false;
-    if (width!=w || height!=h)
-        check(swap->ResizeBuffers(bufferCount,w,h,colorFormat,0), "Resizing presentation buffers");
-    width=w; height=h;
-    for (UINT i=0;i<bufferCount;++i)
-        check(swap->GetBuffer(i,IID_PPV_ARGS(&frames[i].back)), "Acquiring presentation buffer");
-    auto texture=[&](DXGI_FORMAT format,D3D12_RESOURCE_FLAGS flags,D3D12_RESOURCE_STATES state,D3D12_CLEAR_VALUE clear) {
-        D3D12_RESOURCE_DESC desc{};
-        desc.Dimension=D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-        desc.Width=w; desc.Height=h; desc.DepthOrArraySize=desc.MipLevels=desc.SampleDesc.Count=1;
-        desc.Format=format; desc.Flags=flags; clear.Format=format;
-        auto properties=heap(D3D12_HEAP_TYPE_DEFAULT);
-        ComPtr<ID3D12Resource> tex;
-        check(device->CreateCommittedResource(&properties,D3D12_HEAP_FLAG_NONE,&desc,state,&clear,IID_PPV_ARGS(&tex)), "Allocating viewport attachment");
-        return tex;
+void Renderer::Impl::makePipelines() {
+    const auto begin = Clock::now();
+    if (pipeline)
+        vkDestroyPipeline(d.device, std::exchange(pipeline, VK_NULL_HANDLE), nullptr);
+    if (ground)
+        vkDestroyPipeline(d.device, std::exchange(ground, VK_NULL_HANDLE), nullptr);
+    auto makeModule = [&](std::span<const uint32_t> code) {
+        VkShaderModule module{};
+        VkShaderModuleCreateInfo ci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+        ci.codeSize = code.size_bytes();
+        ci.pCode = code.data();
+        check(vkCreateShaderModule(d.device, &ci, nullptr, &module), "Loading validated SPIR-V");
+        return module;
     };
-    D3D12_CLEAR_VALUE clear{};
-    clear.Color[0]=.100f; clear.Color[1]=.126f; clear.Color[2]=.155f; clear.Color[3]=1;
-    color=texture(colorFormat,D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,D3D12_RESOURCE_STATE_RENDER_TARGET,clear);
-    clear={};
-    ids=texture(tokenFormat,D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,D3D12_RESOURCE_STATE_RENDER_TARGET,clear);
-    clear.DepthStencil.Depth=1;
-    depth=texture(depthFormat,D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL,D3D12_RESOURCE_STATE_DEPTH_WRITE,clear);
-    device->CreateRenderTargetView(color.Get(),nullptr,rtv(0));
-    device->CreateRenderTargetView(ids.Get(),nullptr,rtv(1));
-    device->CreateDepthStencilView(depth.Get(),nullptr,dsv->GetCPUDescriptorHandleForHeapStart());
+    struct Modules {
+        VkDevice device;
+        VkShaderModule vs{}, fs{};
+        ~Modules() {
+            if (vs)
+                vkDestroyShaderModule(device, vs, nullptr);
+            if (fs)
+                vkDestroyShaderModule(device, fs, nullptr);
+        }
+    } modules{d.device};
+    modules.vs = makeModule(shaders::vertex);
+    modules.fs = makeModule(shaders::fragment);
+    VkPipelineShaderStageCreateInfo stages[2]{};
+    stages[0].sType = stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+    stages[0].module = modules.vs;
+    stages[0].pName = "main";
+    stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    stages[1].module = modules.fs;
+    stages[1].pName = "main";
+    VkVertexInputBindingDescription stream{0, sizeof(Vertex), VK_VERTEX_INPUT_RATE_VERTEX};
+    VkVertexInputAttributeDescription inputs[] = {{0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0},
+                                                  {1, 0, VK_FORMAT_R32G32B32_SFLOAT, 12}};
+    VkPipelineVertexInputStateCreateInfo vertex{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+    vertex.vertexBindingDescriptionCount = 1;
+    vertex.pVertexBindingDescriptions = &stream;
+    vertex.vertexAttributeDescriptionCount = 2;
+    vertex.pVertexAttributeDescriptions = inputs;
+    VkPipelineInputAssemblyStateCreateInfo topology{
+        VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
+    topology.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    VkPipelineViewportStateCreateInfo viewport{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
+    viewport.viewportCount = viewport.scissorCount = 1;
+    VkPipelineRasterizationStateCreateInfo raster{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
+    raster.lineWidth = 1;
+    raster.polygonMode = VK_POLYGON_MODE_FILL;
+    raster.cullMode = VK_CULL_MODE_NONE;
+    raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    VkPipelineMultisampleStateCreateInfo samples{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
+    samples.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+    VkPipelineDepthStencilStateCreateInfo depthTest{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
+    depthTest.depthTestEnable = VK_TRUE;
+    depthTest.depthWriteEnable = VK_TRUE;
+    depthTest.depthCompareOp = VK_COMPARE_OP_LESS;
+    VkPipelineColorBlendAttachmentState output[2]{};
+    output[0].colorWriteMask = output[1].colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                                                          VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    VkPipelineColorBlendStateCreateInfo blend{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
+    blend.attachmentCount = 2;
+    blend.pAttachments = output;
+    VkDynamicState states[]{VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+    VkPipelineDynamicStateCreateInfo dynamic{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
+    dynamic.dynamicStateCount = 2;
+    dynamic.pDynamicStates = states;
+    VkFormat formats[] = {format, idFormat};
+    VkPipelineRenderingCreateInfo rendering{VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
+    rendering.colorAttachmentCount = 2;
+    rendering.pColorAttachmentFormats = formats;
+    rendering.depthAttachmentFormat = depthFormat;
+    VkGraphicsPipelineCreateInfo ci{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, &rendering};
+    ci.stageCount = 2;
+    ci.pStages = stages;
+    ci.pInputAssemblyState = &topology;
+    ci.pVertexInputState = &vertex;
+    ci.pViewportState = &viewport;
+    ci.pRasterizationState = &raster;
+    ci.pMultisampleState = &samples;
+    ci.pColorBlendState = &blend;
+    ci.pDynamicState = &dynamic;
+    ci.pDepthStencilState = &depthTest;
+    ci.layout = layout;
+    check(vkCreateGraphicsPipelines(d.device, {}, 1, &ci, nullptr, &pipeline),
+          "Creating opaque geometry pipeline");
+    depthTest.depthWriteEnable = VK_FALSE;
+    check(vkCreateGraphicsPipelines(d.device, {}, 1, &ci, nullptr, &ground),
+          "Creating construction grid pipeline");
+    d.label(VK_OBJECT_TYPE_PIPELINE, reinterpret_cast<uint64_t>(pipeline), "Opaque meshes and identity");
+    pipelineMs = std::chrono::duration<double, std::milli>(Clock::now() - begin).count();
 }
 
-void Renderer::Impl::draw(std::span<const DrawObject> objects,const Camera& camera,UINT selected) {
-    const UINT index=swap->GetCurrentBackBufferIndex();
-    auto& frame=frames[index];
-    wait(frame.finished);
-    begin(frame.allocator.Get());
-    list->SetPipelineState(pipeline.Get());
-    list->SetGraphicsRootSignature(root.Get());
-    D3D12_VIEWPORT viewport{0,0,static_cast<float>(width),static_cast<float>(height),0,1};
-    D3D12_RECT scissor{0,0,static_cast<LONG>(width),static_cast<LONG>(height)};
-    list->RSSetViewports(1,&viewport); list->RSSetScissorRects(1,&scissor);
-    auto first=rtv(0), ds=dsv->GetCPUDescriptorHandleForHeapStart();
-    list->OMSetRenderTargets(2,&first,TRUE,&ds);
-    constexpr float background[]{.100f,.126f,.155f,1};
-    constexpr float empty[]{0,0,0,0};
-    list->ClearRenderTargetView(first,background,0,nullptr);
-    list->ClearRenderTargetView(rtv(1),empty,0,nullptr);
-    list->ClearDepthStencilView(ds,D3D12_CLEAR_FLAG_DEPTH,1,0,0,nullptr);
-    list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    list->IASetVertexBuffers(0,1,&vb);
-    list->IASetIndexBuffer(&ib);
-
+void Renderer::Impl::prepare(Frame& f, std::span<const DrawObject> objects, const Camera& camera,
+                             uint32_t selected) {
+    static_assert(offsetof(Constants, viewProjection) == shaders::offset::viewProjection &&
+                  offsetof(Constants, world) == shaders::offset::world);
+    static_assert(offsetof(Constants, normal) == shaders::offset::normalMatrix &&
+                  offsetof(Constants, color) == shaders::offset::baseColor);
+    static_assert(offsetof(Constants, eye) == shaders::offset::eye &&
+                  offsetof(Constants, selected) == shaders::offset::selected);
+    static_assert(offsetof(Constants, token) == shaders::offset::token &&
+                  offsetof(Constants, mesh) == shaders::offset::meshKind);
+    static_assert(sizeof(Constants) <= shaders::sceneSize && shaders::sceneSet == 0);
+    auto slots = objects.size() + 1;
+    if (slots > std::min<VkDeviceSize>(64ull << 20, UINT32_MAX) / stride)
+        throw std::runtime_error("Scene draw parameters exceed the per-frame resource budget.");
+    const auto used = slots * stride;
+    if (used > f.uniforms.size) {
+        f.uniforms = d.buffer(std::max<VkDeviceSize>(used, 32 * stride), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                              MemoryIntent::Upload, "Frame draw parameters");
+        VkDescriptorBufferInfo info{f.uniforms.handle, 0, shaders::sceneSize};
+        VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        write.dstSet = f.constants;
+        write.dstBinding = shaders::sceneBinding;
+        write.descriptorCount = 1;
+        write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+        write.pBufferInfo = &info;
+        vkUpdateDescriptorSets(d.device, 1, &write, 0, nullptr);
+    }
     Constants c{};
-    XMVECTOR center=vector(camera.target), eye=center+offset(camera)*camera.distance;
-    auto view=XMMatrixLookAtRH(eye,center,XMVectorSet(0,1,0,0));
-    auto projection=XMMatrixPerspectiveFovRH(fov,static_cast<float>(width)/static_cast<float>(height),.04f,2000.f);
-    XMStoreFloat4x4(&c.viewProjection,view*projection);
-    XMStoreFloat3(&c.eye,eye); c.selected=selected;
-    auto submit=[&](unsigned kind,XMMATRIX world) {
-        XMStoreFloat4x4(&c.world,world);
-        XMStoreFloat4x4(&c.normal,XMMatrixTranspose(XMMatrixInverse(nullptr,world)));
-        c.mesh=kind;
-        list->SetGraphicsRoot32BitConstants(0,sizeof(c)/4,&c,0);
-        list->DrawIndexedInstanced(ranges[kind].count,1,ranges[kind].startIndex,0,0);
+    auto center = vector(camera.target), eye = center + offset(camera) * camera.distance;
+    auto view = XMMatrixLookAtRH(eye, center, XMVectorSet(0, 1, 0, 0));
+    auto projection = XMMatrixPerspectiveFovRH(fov, float(extent.width) / float(extent.height), .04f, 2000.f);
+    XMStoreFloat4x4(&c.viewProjection, view * projection);
+    XMStoreFloat3(&c.eye, eye);
+    c.selected = selected;
+    auto store = [&](size_t i, XMMATRIX world) {
+        XMStoreFloat4x4(&c.world, world);
+        XMStoreFloat4x4(&c.normal, XMMatrixTranspose(XMMatrixInverse(nullptr, world)));
+        std::memcpy(static_cast<std::byte*>(f.uniforms.mapped) + i * stride, &c, sizeof(c));
     };
-    submit(3,XMMatrixScaling(1800,1,1800)*XMMatrixTranslation(camera.target[0],-.012f,camera.target[2]));
-    for (const auto& o:objects) {
-        auto kind=static_cast<unsigned>(o.mesh);
-        if (o.token==0 || kind>=3) continue;
-        const auto& r=o.rotation;
-        auto rotation=XMMatrixRotationX(XMConvertToRadians(r[0]))*XMMatrixRotationY(XMConvertToRadians(r[1]))*
-                      XMMatrixRotationZ(XMConvertToRadians(r[2]));
-        c.color=o.color; c.token=o.token;
-        submit(kind,XMMatrixScalingFromVector(vector(o.scale))*rotation*XMMatrixTranslationFromVector(vector(o.position)));
+    c.mesh = 3;
+    store(0, XMMatrixScaling(1800, 1, 1800) * XMMatrixTranslation(camera.target[0], -.012f, camera.target[2]));
+    for (size_t i = 0; i < objects.size(); ++i) {
+        const auto& o = objects[i];
+        auto rotation = XMMatrixRotationX(XMConvertToRadians(o.rotation[0])) *
+                        XMMatrixRotationY(XMConvertToRadians(o.rotation[1])) *
+                        XMMatrixRotationZ(XMConvertToRadians(o.rotation[2]));
+        c.mesh = static_cast<uint32_t>(o.mesh);
+        c.color = o.color;
+        c.token = o.token;
+        store(i + 1, XMMatrixScalingFromVector(vector(o.scale)) * rotation *
+                         XMMatrixTranslationFromVector(vector(o.position)));
     }
-    transition(list.Get(),color.Get(),D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_COPY_SOURCE);
-    transition(list.Get(),frame.back.Get(),D3D12_RESOURCE_STATE_PRESENT,D3D12_RESOURCE_STATE_COPY_DEST);
-    list->CopyResource(frame.back.Get(),color.Get());
-    transition(list.Get(),frame.back.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_PRESENT);
-    transition(list.Get(),color.Get(),D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_RENDER_TARGET);
-    execute();
-    frame.finished=signal();
-    check(swap->Present(1,0), "Presenting viewport");
-    drawn=true;
+    check(vmaFlushAllocation(d.allocator, f.uniforms.allocation, 0, used), "Flushing scene parameters");
 }
 
-Capture Renderer::Impl::read(UINT x,UINT y,UINT w,UINT h,bool withColor) {
-    Capture result;
-    if (!drawn || !w || !h) return result;
-    // Both attachments use four bytes per pixel. Rows and planes obey D3D12 copy-footprint alignment.
-    const UINT pitch=(w*4+255)&~255u;
-    const UINT64 plane=(static_cast<UINT64>(pitch)*h+511)&~511ull;
-    const UINT64 size=plane*(withColor ? 2 : 1);
-    auto staging=makeBuffer(device.Get(),size,D3D12_HEAP_TYPE_READBACK,D3D12_RESOURCE_STATE_COPY_DEST);
-    begin(auxiliary.Get());
-    D3D12_BOX box{x,y,0,x+w,y+h,1};
-    auto copy=[&](ID3D12Resource* tex,DXGI_FORMAT format,UINT64 offsetBytes) {
-        D3D12_TEXTURE_COPY_LOCATION src{};
-        src.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; src.pResource=tex;
-        D3D12_TEXTURE_COPY_LOCATION dest{};
-        dest.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT; dest.pResource=staging.Get();
-        dest.PlacedFootprint.Offset=offsetBytes;
-        dest.PlacedFootprint.Footprint={format,w,h,1,pitch};
-        transition(list.Get(),tex,D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_COPY_SOURCE);
-        list->CopyTextureRegion(&dest,0,0,0,&src,&box);
-        transition(list.Get(),tex,D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_RENDER_TARGET);
-    };
-    copy(ids.Get(),tokenFormat,0);
-    if (withColor) copy(color.Get(),colorFormat,plane);
-    execute(); wait(signal());
-    result.width=w; result.height=h;
-    result.tokens.resize(static_cast<size_t>(w)*h);
-    if (withColor) result.rgba.resize(static_cast<size_t>(w)*h*4);
-    std::uint8_t* data{};
-    D3D12_RANGE readRange{0,static_cast<SIZE_T>(size)};
-    check(staging->Map(0,&readRange,reinterpret_cast<void**>(&data)), "Reading rendered viewport");
-    for (UINT row=0;row<h;++row) {
-        const auto dst=static_cast<size_t>(row)*w, src=static_cast<size_t>(row)*pitch;
-        std::memcpy(result.tokens.data()+dst,data+src,w*4);
-        if (withColor) std::memcpy(result.rgba.data()+dst*4,data+plane+src,w*4);
+void Renderer::Impl::record(Frame& f, std::span<const DrawObject> objects, uint32_t imageIndex) {
+    auto cmd = f.cmd;
+    startCommands(d.device, f.pool, cmd);
+    if (f.timing) {
+        vkCmdResetQueryPool(cmd, f.timing, 0, 2);
+        vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, f.timing, 0);
     }
-    D3D12_RANGE noWrite{0,0};
-    staging->Unmap(0,&noWrite);
+    for (auto* image : {&f.color, &f.ids}) {
+        imageBarrier(cmd, image->handle, image->aspect,
+                     f.rendered ? VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED,
+                     VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                     f.rendered ? VK_PIPELINE_STAGE_2_COPY_BIT : VK_PIPELINE_STAGE_2_NONE,
+                     f.rendered ? VK_ACCESS_2_TRANSFER_READ_BIT : 0,
+                     VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+    }
+    constexpr auto tests =
+        VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
+    imageBarrier(
+        cmd, f.depth.handle, f.depth.aspect,
+        f.rendered ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED,
+        VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, f.rendered ? tests : VK_PIPELINE_STAGE_2_NONE,
+        f.rendered ? VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT : 0, tests,
+        VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT);
+    auto attachment = [](VkImageView view, VkImageLayout layout) {
+        VkRenderingAttachmentInfo a{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+        a.imageView = view;
+        a.imageLayout = layout;
+        a.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        a.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        return a;
+    };
+    VkRenderingAttachmentInfo colors[] = {attachment(f.color.view, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL),
+                                          attachment(f.ids.view, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)};
+    colors[0].clearValue.color = {{.100f, .126f, .155f, 1.f}};
+    auto dep = attachment(f.depth.view, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+    dep.clearValue.depthStencil = {1, 0};
+    dep.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    VkRenderingInfo render{VK_STRUCTURE_TYPE_RENDERING_INFO};
+    render.renderArea = {{0, 0}, extent};
+    render.layerCount = 1;
+    render.colorAttachmentCount = 2;
+    render.pColorAttachments = colors;
+    render.pDepthAttachment = &dep;
+    vkCmdBeginRendering(cmd, &render);
+    VkViewport viewport{0, float(extent.height), float(extent.width), -float(extent.height), 0, 1};
+    VkRect2D scissor{{0, 0}, extent};
+    vkCmdSetViewport(cmd, 0, 1, &viewport);
+    vkCmdSetScissor(cmd, 0, 1, &scissor);
+    VkDeviceSize zero{};
+    vkCmdBindVertexBuffers(cmd, 0, 1, &geometry.handle, &zero);
+    vkCmdBindIndexBuffer(cmd, geometry.handle, indexOffset, VK_INDEX_TYPE_UINT32);
+    auto submit = [&](size_t i, uint32_t mesh) {
+        uint32_t off = static_cast<uint32_t>(stride * i);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, shaders::sceneSet, 1,
+                                &f.constants, 1, &off);
+        vkCmdDrawIndexed(cmd, ranges[mesh].count, 1, ranges[mesh].startIndex, 0, 0);
+    };
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ground);
+    submit(0, 3);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+    for (size_t i = 0; i < objects.size(); ++i)
+        if (objects[i].token && static_cast<uint32_t>(objects[i].mesh) < 3)
+            submit(i + 1, static_cast<uint32_t>(objects[i].mesh));
+    vkCmdEndRendering(cmd);
+    for (auto* image : {&f.color, &f.ids})
+        imageBarrier(cmd, image->handle, image->aspect, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                     VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                     VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_2_COPY_BIT,
+                     VK_ACCESS_2_TRANSFER_READ_BIT);
+    auto back = images[imageIndex].image;
+    imageBarrier(cmd, back, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
+                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_PIPELINE_STAGE_2_COPY_BIT, 0,
+                 VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+    VkImageCopy copy{};
+    copy.srcSubresource = copy.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    copy.extent = {extent.width, extent.height, 1};
+    vkCmdCopyImage(cmd, f.color.handle, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, back,
+                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+    imageBarrier(cmd, back, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                 VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                 VK_PIPELINE_STAGE_2_NONE, 0);
+    if (f.timing)
+        vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT, f.timing, 1);
+    check(vkEndCommandBuffer(cmd), "Closing viewport commands");
+}
+void Renderer::Impl::draw(std::span<const DrawObject> objects, const Camera& camera, uint32_t selected) {
+    auto begin = Clock::now();
+    if (pendingResize)
+        rebuild();
+    if (!chain)
+        return;
+    auto& f = frames[current];
+    check(vkWaitForFences(d.device, 1, &f.fence, VK_TRUE, timeout), "Reusing completed frame");
+    if (f.rendered && f.timing) {
+        uint64_t times[2]{};
+        check(vkGetQueryPoolResults(d.device, f.timing, 0, 2, sizeof(times), times, sizeof(uint64_t),
+                                    VK_QUERY_RESULT_64_BIT),
+              "Collecting GPU timing");
+        const uint64_t mask = d.timestampBits == 64 ? UINT64_MAX : ((uint64_t{1} << d.timestampBits) - 1);
+        gpuMs = double((times[1] - times[0]) & mask) * d.properties.limits.timestampPeriod / 1e6;
+    }
+    vmaSetCurrentFrameIndex(d.allocator, ++frameNumber);
+    prepare(f, objects, camera, selected);
+    uint32_t idx{};
+    VkResult acquired = vkAcquireNextImageKHR(d.device, chain, timeout, f.acquired, {}, &idx);
+    if (acquired == VK_ERROR_OUT_OF_DATE_KHR) {
+        pendingResize = true;
+        drawn = false;
+        return;
+    }
+    if (acquired != VK_SUBOPTIMAL_KHR)
+        check(acquired, "Acquiring display image");
+    pendingResize = acquired == VK_SUBOPTIMAL_KHR;
+    record(f, objects, idx);
+    VkSemaphoreSubmitInfo wait{VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO};
+    wait.semaphore = f.acquired;
+    wait.stageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+    VkSemaphoreSubmitInfo signal{VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO};
+    signal.semaphore = images[idx].finished;
+    signal.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    VkCommandBufferSubmitInfo commands{VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO};
+    commands.commandBuffer = f.cmd;
+    VkSubmitInfo2 submit{VK_STRUCTURE_TYPE_SUBMIT_INFO_2};
+    submit.waitSemaphoreInfoCount = submit.signalSemaphoreInfoCount = submit.commandBufferInfoCount = 1;
+    submit.pWaitSemaphoreInfos = &wait;
+    submit.pSignalSemaphoreInfos = &signal;
+    submit.pCommandBufferInfos = &commands;
+    check(vkResetFences(d.device, 1, &f.fence), "Resetting frame completion");
+    check(vkQueueSubmit2(d.queue, 1, &submit, f.fence), "Submitting scene");
+    VkPresentInfoKHR present{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
+    present.swapchainCount = 1;
+    present.pSwapchains = &chain;
+    present.pImageIndices = &idx;
+    present.waitSemaphoreCount = 1;
+    present.pWaitSemaphores = &images[idx].finished;
+    auto result = vkQueuePresentKHR(d.queue, &present);
+    if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR)
+        pendingResize = true;
+    else
+        check(result, "Presenting scene");
+    f.rendered = true;
+    last = current;
+    current = (current + 1) % framesInFlight;
+    drawn = result != VK_ERROR_OUT_OF_DATE_KHR;
+    cpuMs = std::chrono::duration<double, std::milli>(Clock::now() - begin).count();
+    if (d.errors.load())
+        throw std::runtime_error("Vulkan validation reported an error. See the validation log.");
+}
+
+Capture Renderer::Impl::read(uint32_t x, uint32_t y, uint32_t w, uint32_t h, bool withColor) {
+    Capture result;
+    if (!drawn || !w || !h)
+        return result;
+    VkDeviceSize plane = VkDeviceSize(w) * h * 4;
+    const auto bytes = plane * (withColor ? 2 : 1);
+    if (bytes > readback.size)
+        readback =
+            d.buffer(bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT, MemoryIntent::Readback, "Viewport readback");
+    auto& f = frames[last];
+    startCommands(d.device, transferPool, transferCmd);
+    auto copy = [&](VkImage image, VkDeviceSize offset) {
+        VkBufferImageCopy region{};
+        region.bufferOffset = offset;
+        region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        region.imageOffset = {static_cast<int>(x), static_cast<int>(y), 0};
+        region.imageExtent = {w, h, 1};
+        vkCmdCopyImageToBuffer(transferCmd, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, readback.handle, 1,
+                               &region);
+    };
+    copy(f.ids.handle, 0);
+    if (withColor)
+        copy(f.color.handle, plane);
+    finishTransfer();
+    check(vmaInvalidateAllocation(d.allocator, readback.allocation, 0, bytes), "Reading completed frame");
+    result.width = w;
+    result.height = h;
+    result.tokens.resize(plane / 4);
+    std::memcpy(result.tokens.data(), readback.mapped, plane);
+    if (withColor) {
+        result.rgba.resize(plane);
+        std::memcpy(result.rgba.data(), static_cast<uint8_t*>(readback.mapped) + plane, plane);
+        if (format == VK_FORMAT_B8G8R8A8_UNORM)
+            for (size_t i = 0; i < result.rgba.size(); i += 4)
+                std::swap(result.rgba[i], result.rgba[i + 2]);
+    }
     return result;
 }
-
-Renderer::Renderer(void* window):impl_(std::make_unique<Impl>()) {
-    impl_->initialize(static_cast<HWND>(window));
+Renderer::Renderer(void* window, uint64_t maxViewportBytes) : impl_(std::make_unique<Impl>()) {
+    impl_->maxViewportBytes = maxViewportBytes;
+    impl_->open(static_cast<HWND>(window));
 }
 Renderer::~Renderer() = default;
-void Renderer::resize(unsigned width,unsigned height) {
-    if (width && height && (width!=impl_->width || height!=impl_->height))
-        impl_->targets(width,height);
+void Renderer::resize(unsigned w, unsigned h) {
+    if (impl_->requested.width != w || impl_->requested.height != h) {
+        impl_->requested = {w, h};
+        impl_->pendingResize = true;
+        impl_->drawn = false;
+    }
 }
-void Renderer::draw(std::span<const DrawObject> objects,const Camera& camera,UINT selected) {
-    impl_->draw(objects,camera,selected);
+void Renderer::draw(std::span<const DrawObject> objects, const Camera& c, uint32_t selected) {
+    impl_->draw(objects, c, selected);
 }
-std::uint32_t Renderer::pick(int x,int y) {
-    if (!impl_->drawn || x<0 || y<0 || static_cast<unsigned>(x)>=impl_->width || static_cast<unsigned>(y)>=impl_->height)
+uint32_t Renderer::pick(int x, int y) {
+    if (!impl_->drawn || x < 0 || y < 0 || static_cast<unsigned>(x) >= impl_->extent.width ||
+        static_cast<unsigned>(y) >= impl_->extent.height)
         return 0;
-    return impl_->read(x,y,1,1,false).tokens.front();
+    return impl_->read(x, y, 1, 1, false).tokens.front();
 }
-Capture Renderer::capture() { return impl_->read(0,0,impl_->width,impl_->height,true); }
-const std::string& Renderer::adapter() const { return impl_->adapterName; }
+Capture Renderer::capture() {
+    return impl_->read(0, 0, impl_->extent.width, impl_->extent.height, true);
 }
+const std::string& Renderer::adapter() const {
+    return impl_->d.name;
+}
+double Renderer::lastCpuMilliseconds() const {
+    return impl_->cpuMs;
+}
+double Renderer::lastGpuMilliseconds() const {
+    return impl_->gpuMs;
+}
+unsigned Renderer::validationErrors() const {
+    return impl_->d.errors.load();
+}
+std::string Renderer::diagnostics() const {
+    std::ostringstream s;
+    s << impl_->d.report() << " | " << impl_->extent.width << "x" << impl_->extent.height << " | "
+      << (impl_->format == VK_FORMAT_B8G8R8A8_UNORM ? "BGRA8" : "RGBA8") << " SDR, D32, R32_UINT, FIFO, "
+      << impl_->images.size() << " images"
+      << " | attachment bytes " << impl_->attachmentBytes << ", peak " << impl_->peakAttachmentBytes
+      << ", readback capacity " << impl_->readback.size << " | last CPU submit/present " << impl_->cpuMs
+      << " ms, last completed GPU frame " << impl_->gpuMs << " ms, pipeline creation " << impl_->pipelineMs
+      << " ms";
+    return s.str();
+}
+} // namespace platz::engine

@@ -9,6 +9,7 @@ $bin = Join-Path $vs 'Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin'
 if (!(Test-Path (Join-Path $root '.deps/lib/cmake/Qt6/Qt6Config.cmake'))) {
     & "$PSScriptRoot/setup-qt.ps1"
 }
+& "$PSScriptRoot/setup-graphics.ps1"
 & "$bin/cmake.exe" -S $root -B "$root/build" -G 'Visual Studio 18 2026' -A x64
 if ($LASTEXITCODE) { throw 'Configuration failed.' }
 & "$bin/cmake.exe" --build "$root/build" --config Release --parallel

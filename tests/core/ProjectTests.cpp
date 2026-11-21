@@ -55,7 +55,7 @@ void generateValidation(const fs::path& path) {
 }
 struct Fixture {
     fs::path dir=fs::temp_directory_path()/("platz-core-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
-    fs::path source=dir/"Project.platz", copy=dir/"Copy.platz";
+    fs::path source=dir/"Project.platz", copy=dir/u8"\u8907\u672c.platz";
     Fixture() { expect(fs::create_directory(dir),"Unable to reserve test directory."); }
     ~Fixture() {
         std::error_code ec;
@@ -148,6 +148,67 @@ void suite(const fs::path& executable) {
     alter(f.copy,"UPDATE objects SET mesh='builtin:future/v3'"); rejects([&]{ Project::open(f.copy); });
     expect(Project::open(f.source).objects()==edited,"Compatibility failure damaged original.");
     pass("unknown schema, executable schema additions and missing primitive rejection");
+
+    // Use a genuine v1 layout, including a retained prior revision. Opening it is read-only
+    // with respect to schema. Migration and publication share the first explicit changed save.
+    fs::copy_file(f.source,f.copy,fs::copy_options::overwrite_existing);
+    alter(f.copy,"DROP TABLE snapshots; PRAGMA user_version=1");
+    auto legacy=Project::open(f.copy);
+    expect(legacy.objects()==edited && legacy.canRestorePrevious(),"Lost v1 source or history.");
+    auto source=legacy.objects().at(1);
+    auto duplicateId=legacy.duplicate(source.id,legacy.revision());
+    Object expected=source;
+    expected.id=duplicateId; expected.name += " copy";
+    expect(duplicateId!=source.id && *legacy.find(duplicateId)==expected &&
+           *legacy.find(source.id)==source,"Duplicate source mapping failed.");
+    const auto afterDuplicate=legacy.objects();
+    rejects([&]{legacy.remove(source.id,legacy.revision()-1);});
+    rejects([&]{legacy.duplicate(source.id,legacy.revision()-1);});
+    rejects([&]{legacy.remove("missing",legacy.revision());});
+    rejects([&]{legacy.duplicate("missing",legacy.revision());});
+    expect(legacy.objects()==afterDuplicate,"Rejected structure edit mutated source.");
+    legacy.undo(); expect(!legacy.find(duplicateId),"Duplicate undo failed.");
+    legacy.redo(); expect(legacy.objects()==afterDuplicate,"Duplicate redo changed identity or ordering.");
+    legacy.save();
+    auto structure=Project::open(f.copy);
+    expect(structure.objects()==afterDuplicate && structure.sceneId()==p.sceneId() && structure.id()==p.id(),
+           "v1 migration lost source or identities.");
+    structure.restorePrevious(); expect(structure.objects()==edited,"Migrated previous revision lost.");
+    structure.undo();
+    pass("duplicate with stable new identity, stale/unknown target rejection and v1-to-v2 save");
+
+    structure.remove(source.id,structure.revision());
+    expect(!structure.find(source.id) && *structure.find(duplicateId)==expected,"Delete affected the wrong object.");
+    structure.undo(); expect(structure.objects()==afterDuplicate,"Delete undo changed identity, source or order.");
+    structure.redo(); expect(!structure.find(source.id) && structure.find(duplicateId),"Delete redo failed.");
+    while (!structure.objects().empty()) structure.remove(structure.objects().back().id,structure.revision());
+    structure.save();
+    auto empty=Project::open(f.copy);
+    expect(empty.objects().empty() && empty.canRestorePrevious(),"Saved empty scene was not recoverable.");
+    expect(Runtime(empty).objects().empty(),"Empty runtime contains phantom entities.");
+    empty.restorePrevious(); expect(empty.objects()==afterDuplicate,"Empty scene lost recovery data.");
+    empty.save();
+    auto filled=Project::open(f.copy);
+    filled.restorePrevious(); expect(filled.objects().empty(),"Could not restore an empty earlier scene.");
+    pass("delete all, undo/redo, persist and restore populated and empty scenes");
+
+    auto largeName=filled.add(Mesh::Cylinder);
+    auto renamed=*filled.find(largeName);
+    renamed.name=std::string(233,'K')+"\xe2\x98\x80\xe2\x98\x80";
+    filled.edit(renamed,filled.revision());
+    auto longCopy=filled.duplicate(largeName,filled.revision());
+    expect(filled.find(longCopy)->name==std::string(233,'K')+" copy","Duplicate split a UTF-8 code point.");
+    pass("max-length Unicode object duplication on a Unicode project path");
+
+    auto outside=Project::open(f.copy);
+    auto outsider=outside.objects().front();
+    outside.remove(outsider.id,outside.revision());
+    alter(f.copy,"UPDATE objects SET name='Other editor' WHERE rev=(SELECT head FROM project) AND seq=0");
+    rejects([&]{outside.save();});
+    expect(Project::open(f.copy).objects().front().name=="Other editor","External edit was overwritten.");
+    alter(f.copy,"DELETE FROM objects WHERE rev=(SELECT head FROM project) AND seq=0");
+    rejects([&]{Project::open(f.copy);});
+    pass("out-of-band source edits and incomplete snapshot counts detected");
 }
 }
 

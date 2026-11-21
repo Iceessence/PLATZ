@@ -1,6 +1,10 @@
 #include "StudioWindow.hpp"
 #include "Viewport.hpp"
 #include <QApplication>
+#include <QAction>
+#include <QDockWidget>
+#include <QInputMethodEvent>
+#include <QMenu>
 #include <QDoubleSpinBox>
 #include <QFile>
 #include <QFileDialog>
@@ -76,13 +80,15 @@ void fileAction(StudioWindow& window, Qt::Key shortcut, const QString& path) {
         if (!editor) { observer.stop(); dialog->reject(); return; }
         observer.stop();
         answered = true;
-        dialog->selectFile(path);
-        QTest::keyClick(editor, Qt::Key_Return);
+        editor->setText(QDir::toNativeSeparators(path));
+        static_cast<QDialog*>(dialog)->accept();
+        if (dialog->isVisible()) dialog->reject();
     });
     observer.start(25);
-    QTest::keyClick(&window, shortcut, Qt::ControlModifier);
+    auto* entry=control<QPushButton>(window,shortcut==Qt::Key_N ? "newProject" : "openProject");
+    QTest::mouseClick(entry,Qt::LeftButton);
     QApplication::processEvents();
-    check(answered, "Native Studio project shortcut did not open its file chooser");
+    check(answered, "Studio project button did not open its file chooser");
 }
 
 void exercise(const QString& path, bool create) {
@@ -107,6 +113,28 @@ void exercise(const QString& path, bool create) {
         check(viewport->isVisible() && tree->count() == int(before.objects().size()),
               "Opened project failed to populate the visible Studio");
         auto frame = settledFrame(*viewport);
+        // Add through Studio's creation menu. The file stays at its opened revision.
+        auto* add = control<QPushButton>(window, "addObject");
+        check(add->menu() && add->menu()->actions().size()==3, "Creation menu is unavailable");
+        add->menu()->actions().front()->trigger();
+        check(tree->count()==int(before.objects().size()+1), "Add object failed");
+        const auto addedId=tree->currentItem()->data(Qt::UserRole).toString();
+        viewport->setFocus();
+        QTest::keyClick(viewport,Qt::Key_D,Qt::ControlModifier);
+        check(tree->count()==int(before.objects().size()+2) && tree->currentItem()->data(Qt::UserRole).toString()!=addedId,
+              "Duplicate did not select a new stable identity");
+        tree->setFocus();
+        QTest::keyClick(tree,Qt::Key_Delete);
+        check(tree->count()==int(before.objects().size()+1),"Delete failed");
+        // Undo delete, duplicate and add to return to the reference scene.
+        for(int i=0;i<3;++i) QTest::keyClick(tree,Qt::Key_Z,Qt::ControlModifier);
+        check(tree->count()==int(before.objects().size()),"Undo did not restore original object count");
+        auto* dock=control<QDockWidget>(window,"inspectorDock");
+        dock->toggleViewAction()->trigger();
+        check(!dock->isVisible(),"Inspector docking visibility control failed");
+        dock->toggleViewAction()->trigger();
+        check(dock->isVisible(),"Inspector failed to reopen");
+        frame=settledFrame(*viewport);
         QTest::keyClick(viewport, Qt::Key_Right);
         check(settledFrame(*viewport).tokens != frame.tokens, "Editor camera input did not update the GPU image");
         QTest::keyClick(viewport, Qt::Key_Home);
@@ -121,6 +149,13 @@ void exercise(const QString& path, bool create) {
         }
         const auto& target = before.objects()[3];
         editedId = target.id;
+        name->setFocus();
+        name->selectAll();
+        QInputMethodEvent composed;
+        composed.setCommitString(QString::fromUtf8("色彩"));
+        QApplication::sendEvent(name,&composed);
+        QTest::keyClick(name,Qt::Key_Return);
+        check(name->text()==QString::fromUtf8("色彩"),"Unicode input-method commit failed");
         enterText(name, "Qualification object");
         enterText(position, QString::number(target.position.x + 0.35, 'f', 2));
         check(settledFrame(*viewport).tokens != frame.tokens, "Inspector transform failed to move rendered geometry");
