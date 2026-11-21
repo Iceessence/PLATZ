@@ -9,6 +9,8 @@ Double-click out\Release\PLATZ.exe for the project hub, or run the following in 
 
 Use New project in the hub to create an ordinary editable .platz file. Select an object in the viewport or Scene panel. Edit name, position, rotation, scale or color in the Inspector. Right-drag to orbit, middle-drag to pan, scroll to zoom, and press F in the viewport to frame the selection. Add object creates primitives. Edit > Repeat objects previews copies with world-space spacing. Create copies accepts the entire operation, and Ctrl+Z undoes it. F5 starts Play. Click a block or column to turn it and use WASD to move. Escape restores the authored scene and camera. Ctrl+S saves. The Project menu can restore the previous saved revision as an undoable edit.
 
+In Studio, choose **Add object → Import mesh from GLB…** to bring in one indexed triangle primitive with an embedded buffer. The viewport frames it and selects the new object. This version imports local-space positions and normals. The PLATZ Inspector controls placement and base color. Save the project to embed the source so the .platz file can travel by itself. Select an imported object and choose **Save original GLB…** in the Inspector to write a byte-for-byte copy to a new file. GLB support is limited to 2 MiB per source and 8 MiB of unique mesh sources per scene.
+
 ## Build and verify
 On Windows x64 with VS 2026 Desktop development with C++, Windows SDK 10.0.26100, VS CMake tools, Python 3.9+ with the py launcher, Windows tar and curl:
 

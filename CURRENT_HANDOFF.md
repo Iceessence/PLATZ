@@ -1,30 +1,35 @@
 # Current handoff and verification ledger
 
-21 November 2026. Windows x64 Release development candidate. Tested software commit **978d81604cc55fda35b1d554fef224a772266b42**. The documentation commit following it records the receipt. Use git status --short --branch and git rev-parse HEAD for the live checkout. Launch and build instructions are in START_HERE.md.
+21 November 2026. Windows x64 Release development candidate. Tested software commit **8500577f6daa6d4fd0d4f7ebf5dd8f9e094802ca**. The following documentation commit records its receipt. Use git status --short --branch and git rev-parse HEAD for the live checkout. Launch and build instructions live in START_HERE.md.
 
-## Recovery and authority
-f1bbbb4 preserves the interrupted C++/D3D12 source. 9d8d4a8 preserves the integrated Vulkan implementation before the latest feature batch. fc5a8bd adds repeat, SDL resize repair and separate-process qualification. 978d816 corrects transform field clipping and qualifies the production style. Master and developer directive matched the supplied originals by SHA-256. No identifiable independent snapshot audit or prior current handoff was available when resuming. No release has been independently accepted or owner-frozen.
+## Authority and history
 
-## Active scope and evidence
-Local test host: Windows 11 Pro build 26300, i9-14900K, 96 GB class RAM, GeForce RTX 5080 driver 617.42, device Vulkan 1.4.351, system loader 1.4.341. C++20, MSVC 19.51.36260. Qt Widgets 6.12.0, SDL 3.4.20, Vulkan SDK tools 1.4.363.1, VMA 3.5.0, Slang 2026.22.1. See docs/ADR-001-VULKAN.md. The final PLATZ.exe SHA-256 is 3591E8BD8B2208E934C207D290AD62CE8A8F038FE8C857A78C044E75B82F0EEF.
+The permanent product specification is docs/authority/PLATZ_MASTER_ENGINE_FIRST_V4.md. Its developer directive and Vulkan steering live alongside it. ADR-001 records the Vulkan, Studio, and project architecture. f1bbbb4 preserves the interrupted D3D12 work. 9d8d4a8 contains the Vulkan Studio foundation. fc5a8bd added linear repeat, viewport resize recovery, and a process restart check. 978d816 fixed transform editor clipping. The previous baseline receipt is preserved at 79c04ec. Independent release acceptance remains pending.
 
-All seven CTest entries passed on the development workstation. The executable was also launched with the permanent validation project for visual inspection. The named cases below are scoped VERIFICATIONS, pending separate acceptance.
+## Active implementation
+
+Studio imports local GLB 2.0 geometry via **Add object → Import mesh from GLB…**. The new object is editable, pickable, and compatible with undo, duplicate, repeat, delete, save, and isolated Play. The importer accepts one static indexed triangle primitive with one embedded BIN buffer, float positions, and optional float normals. Missing normals are generated. The limits are 2 MiB per source, 8 MiB of unique embedded sources per scene, and 65,536 vertices / 196,608 indices per mesh. Geometry uses mesh-local coordinates and PLATZ transform and color controls. Imported materials, textures, scene hierarchy, node transforms, animation, and compressed geometry are outside the supported scope. The parser does not resolve external URIs.
+
+Core stores original GLB bytes once per SHA-256 digest in SQLite schema v3. Blobs, references, and revision changes publish in one SQLite transaction. Both retained revisions keep referenced blobs. Versions 1 and 2 remain readable. Saving imported geometry moves the project to v3. The Inspector can save the exact embedded GLB to a new file. Existing files are protected by atomic no-clobber publication. Scene edits remain in the .platz project. The Vulkan renderer rebuilds its indexed mesh atlas when the active asset set changes and retires the old buffer after the transfer fence. Imported instances share the geometry.
+
+## Verified on the development workstation
+
+Windows 11 Pro build 26300, i9-14900K, RTX 5080 driver 617.42, Vulkan device 1.4.351, system loader 1.4.341, C++20 with MSVC 19.51.36260, Qt 6.12.0, SDL 3.4.20, SDK 1.4.363.1, VMA 3.5.0, and Slang 2026.22.1. Release executable SHA-256 **18CD91D5EEC953E49F9AED01FF121F5BAD86BB8BF09FDE8182F45E6CEE104A43**.
+
+Clean Release build passed. All seven CTest entries passed with zero failures. The suite launched and shut down the real local executable twice. Verbose evidence is in build/mesh-delivery-tests.log.
 
 | Test | Observed result |
 |---|---|
-| core-project | 14 scenarios. Includes normal create/no-clobber, invalid/stale changes, undo/redo, isolated Runtime, competing saves, forced process exit/recovery, schema migration, empty scenes, and all-or-nothing linear repeats. |
-| shader_toolchain | Reproducible VS/FS, reflected ABI, include invalidation, failure preserving previous compiled output, source diagnostics and validated debug compute/subgroup SPIR-V. Offline shader tooling. |
-| hardware_frame_readback | GPU color and ID readback, occlusion independent of draw order, exact picking, material change, camera, in-flight resize, zero-size suspension and restore. Synchronization validation enabled. |
-| hardware_gpu_assisted | Same hardware checks with GPU-assisted validation requested and activated. Both hardware validation runs reported zero errors. Loader reported overlay compatibility warnings and GPU-assisted mode reported feature adjustments. |
-| validation_scene_profile | Real four-object validation project, 1280×720, SDR, 1×, FIFO, hidden surface, validation off, 16 warm-up and 96 measured frames. Final CPU submit/present p50/p95 0.2890/8.4516 ms; GPU timestamp p50/p95 0.0204/0.0217 ms. Workload-specific measurements. |
-| studio_edit_play_reopen | On an ordinary project and a disposable validation copy: real Hub/file dialog, creation/duplication/deletion, cancellable and approved linear repeat preview, undo/redo and identity, dock hide/restore, Unicode input-method commit, camera, viewport picking, Inspector edits, changed GPU pixels, Play interaction, exact Stop frame, Save and reopen. Runs with production styling and checks visible numeric editor width. |
-| studio_process_restart | Two actual PLATZ.exe processes and Windows UI Automation. Pending name edit, normal Save, exit, relaunch, same inspector identity and persisted value; source validation project hash preserved. |
+| core-project | 15 scenarios. GLB bytes/bounds, shared mesh references, stable IDs, Runtime isolation, previous revision restoration, rejected corrupt blobs, and subprocess exit during SQLite asset/revision changes. Baseline migration and recovery checks still pass. |
+| shader_toolchain | Deterministic Slang output and validated SPIR-V, material layout reflection, includes, failure preservation, and shader diagnostics. |
+| hardware_frame_readback | Real depth/color/ID readback, picking, viewport resize/restore, imported atlas upload, retirement, re-upload, and matching built-in rendering after removal. Synchronization validation reported zero errors. |
+| hardware_gpu_assisted | Same GPU checks under GPU-assisted validation. Zero Vulkan validation errors. The loader reported existing overlay warnings. |
+| validation_scene_profile | Five-object validation scene, 1280×720, 1×, SDR, hidden FIFO surface, 16 warm-up and 96 measured frames, validation off. CPU submit/present p50/p95 0.1720/8.4179 ms. GPU p50/p95 0.0197/0.0202 ms. |
+| studio_edit_play_reopen | Real Studio controls for GLB import, Inspector edits, Vulkan picking, and Play/Stop. Save/reopen produced identical color and ID buffers after removing the disposable GLB. Extraction matched original bytes and preserved an occupied destination. Ordinary/validation scene authoring regressions also passed. |
+| studio_process_restart | Actual PLATZ.exe save, normal shutdown, and restart with same object ID and edited name. The permanent project's bytes were preserved during qualification. |
 
-Permanent validation source is projects/PLATZ Validation.platz, revision 5. It contains Display plinth, Jade column, Amber sphere and Silver block. Regressions open a disposable copy for editing. Local verbose CTest evidence is in build/Testing/Temporary/LastTest.log and changes on subsequent test runs.
+The permanent validation project is projects/PLATZ Validation.platz at source revision 7. It contains Display plinth, Jade column, Amber sphere, Silver block, and imported Oblique spire. Its first four object IDs were retained. SHA-256 is **D78E5F97588EAA18C539D4D672D251518F939E828FECDD5069FBAE5A15A9312A**.
 
-## Integration and remaining work
-src/core/Project.cpp owns the versioned SQLite project, stable identities, revisions, typed edit staging and isolated Runtime copy. Edit > Repeat objects runs the same Core validation for preview and commit, uses ordinary editable primitives and consumes one history step. The committed replicas are independent objects. src/engine owns Slang shading, explicit Vulkan submission, depth, GPU IDs, VMA-backed buffers/images and diagnostics. src/studio binds saved objects to Qt controls, the native viewport and Play. PLATZ AI has a revision-bound typed change boundary. There is no model worker, model training, executable plugin or autonomous approval path.
+## Continuation
 
-Resolved defects: SDL wrapping the native window without the resizable flag retained 432×288 after the host requested 376×250. The resize test reproduced the mismatch and now passes after restoration. The production stylesheet clipped the numeric editor even though values were accessible and keyboard-operable. A styled test reproduced the clipped region. Removing the conflicting outer spin-box rule restored usable width.
-
-Next coherent feature: import a local indexed triangle mesh (bounded glTF/GLB subset), retain source provenance and a durable content-addressed blob, and project the same geometry into selection, Studio, repeat and Play. Qualify crash ordering between blob publication and SQLite references before enabling imports. Current geometry is limited to three built-in primitives and 512 objects. Device loss/OOM recovery under pressure, sustained complex scenes, PBR/textures, ray tracing, other operating systems, general scripting, full assistive technology/IME and model resource arbitration remain unqualified. Public packaging requires dependency and security servicing review. No owner decision blocks local development.
+The next related feature is an **Assets panel** with reusable mesh assets, instance counts, explicit replacement and undoable reassignments. Follow with bigger asset packages only after qualifying crash-safe ordering, integrity, and reclamation across the database and blob store. Typed revision-bound edits remain the PLATZ AI authority boundary. Model training and inference remain future work. Device loss/OOM stress, sustained large scenes, PBR/textures, ray tracing, other OSes, general scripting, accessibility breadth and GPU contention with ML remain unqualified.

@@ -16,7 +16,9 @@ Keep the existing Qt 6.12.0 Widgets adapter for text, IME, standard input behavi
 
 ## Data and authority
 
-C++ Core owns source IDs and schema, SQLite transactions, revision guards and reversible commands. Runtime receives a snapshot. GPU buffers, selection tokens and camera interaction have no authority to publish source. The staged typed edit API is the first AI integration boundary. Models, untrusted executable content, inference and training remain outside the current capability set. There are no external binary asset references yet. Before introducing them require content hashes, durable blob publication before database commit, reference-aware reclamation, fault injection and path containment.
+C++ Core owns source IDs and schema, SQLite transactions, revision guards and reversible commands. Runtime receives a snapshot. GPU buffers, selection tokens and camera interaction have no authority to publish source. The staged typed edit API is the first AI integration boundary. Models, untrusted executable content, inference and training remain outside the current capability set.
+
+Schema v3 embeds bounded GLB sources in SQLite under a SHA-256 key. The blob, reference and revision head publish in one transaction. Copies and repeats share immutable source bytes and derived mesh data. Saved assets remain available to both retained revisions. This lets a small .platz project move as one file and avoids an external-file commit window. The importer uses vendored cgltf v1.15 (MIT, upstream commit `360db1a95480fe102ae9c69b27c5d101167ff5ba`) and binds only the GLB's checked BIN chunk. A future large-asset store will need durable publication before database commit, reference-aware reclamation, fault injection and path containment. [cgltf v1.15](https://github.com/jkuhlmann/cgltf/releases/tag/v1.15)
 
 ## Dependencies and review
 
