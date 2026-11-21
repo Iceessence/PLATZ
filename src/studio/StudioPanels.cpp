@@ -2,6 +2,9 @@
 #include "Appearance.hpp"
 #include "Viewport.hpp"
 #include <QColorDialog>
+#include <QDialogButtonBox>
+#include <QFormLayout>
+#include <QSpinBox>
 #include <QCoreApplication>
 #include <QDir>
 #include <QDockWidget>
@@ -284,4 +287,64 @@ void StudioWindow::buildInspector() {
         connect(editor,&QLineEdit::textEdited,this,[this]{
             if (project_ && !runtime_ && !refreshing_) save_->setEnabled(true);
         });
+}
+
+void StudioWindow::repeatObjects() {
+    if (!project_ || runtime_ || !project_->find(selected_)) return;
+    finishActiveField();
+    const auto sourceId=selected_;
+    const auto revision=project_->revision();
+    QDialog dialog(this);
+    dialog.setWindowTitle(tr("Repeat objects"));
+    auto* layout=new QVBoxLayout(&dialog);
+    auto* source=label(QString::fromStdString(project_->find(sourceId)->name),"section");
+    layout->addWidget(source);
+    auto* form=new QFormLayout;
+    auto* copies=new QSpinBox;
+    copies->setObjectName("repeatCount");
+    copies->setRange(1,511);
+    copies->setValue(3);
+    form->addRow(tr("Additional copies"),copies);
+    std::array<QDoubleSpinBox*,3> step{};
+    const std::array<QString,3> axes{"X","Y","Z"};
+    for (int i=0;i<3;++i) {
+        step[i]=new QDoubleSpinBox;
+        step[i]->setObjectName("spacing"+axes[i]);
+        step[i]->setRange(-100000,100000);
+        step[i]->setDecimals(3);
+        step[i]->setSingleStep(0.25);
+        step[i]->setValue(i==0 ? 2 : 0);
+        form->addRow(tr("World %1 step (m)").arg(axes[i]),step[i]);
+    }
+    layout->addLayout(form);
+    auto* feedback=label({},"minor");
+    feedback->setWordWrap(true);
+    layout->addWidget(feedback);
+    auto* buttons=new QDialogButtonBox(QDialogButtonBox::Ok|QDialogButtonBox::Cancel);
+    buttons->button(QDialogButtonBox::Ok)->setText(tr("Create copies"));
+    layout->addWidget(buttons);
+    connect(buttons,&QDialogButtonBox::accepted,&dialog,&QDialog::accept);
+    connect(buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject);
+    auto spacing=[&]{return platz::Vec3{float(step[0]->value()),float(step[1]->value()),float(step[2]->value())};};
+    auto preview=[&]{
+        try {
+            auto additions=project_->previewRepeat(sourceId,revision,copies->value(),spacing());
+            auto scene=project_->objects();
+            scene.insert(scene.end(),additions.begin(),additions.end());
+            viewport_->setScene(scene,sourceId);
+            feedback->setText(tr("%1 objects after applying").arg(scene.size()));
+            buttons->button(QDialogButtonBox::Ok)->setEnabled(true);
+        } catch (const std::exception& error) {
+            viewport_->setScene(project_->objects(),sourceId);
+            feedback->setText(QString::fromUtf8(error.what()));
+            buttons->button(QDialogButtonBox::Ok)->setEnabled(false);
+        }
+    };
+    connect(copies,&QSpinBox::valueChanged,&dialog,preview);
+    for(auto* field:step) connect(field,&QDoubleSpinBox::valueChanged,&dialog,preview);
+    preview();
+    dialog.move(inspectorDock_->mapToGlobal(QPoint(0,0)));
+    if (dialog.exec()==QDialog::Accepted)
+        protectedCall([&]{selected_=project_->repeat(sourceId,revision,copies->value(),spacing());});
+    refresh();
 }

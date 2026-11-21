@@ -27,3 +27,8 @@ set_tests_properties(${all_gpu_checks} PROPERTIES
 set_property(TEST hardware_gpu_assisted APPEND PROPERTY ENVIRONMENT "VK_KHRONOS_VALIDATION_GPUAV_ENABLE=true")
 set_target_properties(platz_gpu_checks platz_studio_checks PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests/$<CONFIG>")
+add_executable(platz_process_checks process_checks.cpp)
+target_link_libraries(platz_process_checks PRIVATE platz_core Qt6::Core ole32 oleaut32 uiautomationcore)
+set_target_properties(platz_process_checks PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests/$<CONFIG>")
+add_test(NAME studio_process_restart COMMAND platz_process_checks "$<TARGET_FILE:PLATZ>" "${PROJECT_SOURCE_DIR}/projects/PLATZ Validation.platz")
+set_tests_properties(studio_process_restart PROPERTIES TIMEOUT 45 LABELS "interactive" ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")

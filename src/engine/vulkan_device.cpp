@@ -126,6 +126,7 @@ void Device::open(HWND hwnd) {
     if (!props)
         throw std::runtime_error(SDL_GetError());
     bool configured = SDL_SetPointerProperty(props, SDL_PROP_WINDOW_CREATE_WIN32_HWND_POINTER, hwnd) &&
+                      SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_RESIZABLE_BOOLEAN, true) &&
                       SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_VULKAN_BOOLEAN, true);
     if (configured)
         host = SDL_CreateWindowWithProperties(props);

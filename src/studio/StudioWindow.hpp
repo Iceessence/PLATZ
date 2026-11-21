@@ -40,6 +40,8 @@ private:
     QPushButton *play_{}, *save_{}, *add_{}, *swatch_{}, *recentOpen_{};
     QAction *undo_{}, *redo_{}, *saveAction_{}, *restore_{}, *playAction_{}, *homeAction_{};
     QAction *duplicate_{}, *erase_{};
+    QAction* repeat_{};
+    void repeatObjects();
     QByteArray initialLayout_;
     bool refreshing_{};
     void buildHub();

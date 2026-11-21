@@ -73,6 +73,7 @@ QPushButton:disabled, QToolButton:disabled { color: #879094; background: #222b30
 QPushButton[accent="true"] { color: #102c23; background: #86e8bd; border-color: #97f1cc; font-weight: 650; }
 QPushButton[accent="true"]:hover { background: #acf6d4; }
 QLineEdit, QDoubleSpinBox { background: #11181c; border: 1px solid #3a484e; padding: 5px; border-radius: 4px; }
+QDoubleSpinBox QLineEdit { background: transparent; color: #e2e9e8; border: 0; padding: 0; }
 QListWidget { background: #181f24; border: none; outline: 0; }
 QListWidget::item { padding: 7px 5px; border-radius: 4px; }
 QListWidget::item:selected { background: #27483f; color: #ecfff7; }

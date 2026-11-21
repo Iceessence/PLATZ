@@ -68,6 +68,10 @@ void StudioWindow::buildMenus() {
             project_->remove(selected_,project_->revision()); refresh();
         });
     });
+    repeat_=edit->addAction(tr("Repeat objects…"),QKeySequence(Qt::CTRL|Qt::SHIFT|Qt::Key_D),this,&StudioWindow::repeatObjects);
+    repeat_->setObjectName("repeatObjects");
+    tree_->setContextMenuPolicy(Qt::ActionsContextMenu);
+    tree_->addActions({duplicate_,repeat_,erase_});
     auto* deleteKey = new QShortcut(QKeySequence::Delete,tree_);
     deleteKey->setContext(Qt::WidgetShortcut);
     connect(deleteKey,&QShortcut::activated,erase_,&QAction::trigger);
@@ -151,7 +155,7 @@ void StudioWindow::toHub() {
     sceneDock_->hide(); inspectorDock_->hide(); tools_->hide();
     sceneDock_->toggleViewAction()->setEnabled(false);
     inspectorDock_->toggleViewAction()->setEnabled(false);
-    for (auto* action : {saveAction_,restore_,undo_,redo_,duplicate_,erase_,playAction_,homeAction_}) action->setEnabled(false);
+    for (auto* action : {saveAction_,restore_,undo_,redo_,duplicate_,repeat_,erase_,playAction_,homeAction_}) action->setEnabled(false);
     backend_->hide();
     const auto path=QSettings().value("recentProject").toString();
     const bool available=QFileInfo(path).isFile();
@@ -254,6 +258,7 @@ void StudioWindow::syncInspector() {
     const bool editable=object && !runtime_;
     inspector_->setEnabled(editable);
     duplicate_->setEnabled(editable);
+    repeat_->setEnabled(editable);
     erase_->setEnabled(editable);
     if (!object) {
         name_->clear(); mesh_->setText(tr("Select an object")); identity_->clear(); color_->clear();

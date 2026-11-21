@@ -15,6 +15,7 @@
 #include <QTemporaryDir>
 #include <QTest>
 #include <QTimer>
+#include <QSpinBox>
 #include <algorithm>
 #include <cmath>
 #include <iostream>
@@ -113,6 +114,30 @@ void exercise(const QString& path, bool create) {
         check(viewport->isVisible() && tree->count() == int(before.objects().size()),
               "Opened project failed to populate the visible Studio");
         auto frame = settledFrame(*viewport);
+        const auto initialCount=tree->count();
+        tree->setCurrentRow(1);
+        const auto originalFrame=settledFrame(*viewport);
+        for (const bool apply : {false,true}) {
+            bool previewVisible=false;
+            QTimer::singleShot(30,[&]{
+                auto* dialog=qobject_cast<QDialog*>(QApplication::activeModalWidget());
+                if (!dialog) return;
+                control<QSpinBox>(*dialog,"repeatCount")->setValue(2);
+                control<QDoubleSpinBox>(*dialog,"spacingY")->setValue(0.4);
+                previewVisible=settledFrame(*viewport).tokens!=originalFrame.tokens;
+                if (apply) dialog->accept(); else dialog->reject();
+            });
+            control<QAction>(window,"repeatObjects")->trigger();
+            check(previewVisible,"Array preview did not reach the renderer");
+            check(tree->count()==initialCount+(apply?2:0),"Array creation/cancellation changed wrong object count");
+        }
+        const auto arrayIds=std::array{tree->item(2)->data(Qt::UserRole),tree->item(3)->data(Qt::UserRole)};
+        QTest::keyClick(tree,Qt::Key_Z,Qt::ControlModifier);
+        check(tree->count()==initialCount,"Array undo was not atomic");
+        QTest::keyClick(tree,Qt::Key_Y,Qt::ControlModifier);
+        check(tree->item(2)->data(Qt::UserRole)==arrayIds[0] && tree->item(3)->data(Qt::UserRole)==arrayIds[1],
+              "Array redo replaced copy identities");
+        QTest::keyClick(tree,Qt::Key_Z,Qt::ControlModifier);
         // Add through Studio's creation menu. The file stays at its opened revision.
         auto* add = control<QPushButton>(window, "addObject");
         check(add->menu() && add->menu()->actions().size()==3, "Creation menu is unavailable");

@@ -48,6 +48,9 @@ public:
     void edit(const Object& replacement, std::uint64_t expectedRevision);
     std::string add(Mesh mesh);
     std::string duplicate(const std::string& objectId, std::uint64_t expectedRevision);
+    std::vector<Object> previewRepeat(const std::string& objectId, std::uint64_t expectedRevision,
+                                      unsigned copies, Vec3 spacing) const;
+    std::string repeat(const std::string& objectId, std::uint64_t expectedRevision, unsigned copies, Vec3 spacing);
     void remove(const std::string& objectId, std::uint64_t expectedRevision);
     void undo();
     void redo();

@@ -209,6 +209,21 @@ void suite(const fs::path& executable) {
     alter(f.copy,"DELETE FROM objects WHERE rev=(SELECT head FROM project) AND seq=0");
     rejects([&]{Project::open(f.copy);});
     pass("out-of-band source edits and incomplete snapshot counts detected");
+    auto layout=Project::open(f.source);
+    auto model=layout.objects().front();
+    const auto start=layout.revision();
+    rejects([&]{layout.repeat(model.id,start,2,{100000,0,0});});
+    rejects([&]{layout.repeat(model.id,start,513,{});});
+    rejects([&]{layout.repeat(model.id,start-1,2,{});});
+    expect(layout.revision()==start && !layout.dirty(),"Rejected repeat changed source.");
+    auto last=layout.repeat(model.id,start,3,{1.5f,2.0f,-1.0f});
+    auto arranged=layout.objects();
+    expect(layout.revision()==start+1 && layout.find(last)->position==Vec3{model.position.x+4.5f,model.position.y+6,model.position.z-3},
+           "Repeat lost spacing or generated multiple revisions.");
+    Runtime preview(layout); expect(preview.interact(last) && layout.objects()==arranged,"Runtime repeat isolation failed.");
+    layout.undo(); expect(!layout.dirty(),"Repeat undo failed.");
+    layout.redo(); layout.save(); expect(Project::open(f.source).objects()==arranged,"Repeat reopen changed source identities.");
+    pass("linear repeat, all-or-nothing validation, spacing, runtime, undo and durable identities");
 }
 }
 

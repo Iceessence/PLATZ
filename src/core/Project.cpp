@@ -375,24 +375,42 @@ std::string Project::add(Mesh mesh) {
     auto next=objects_; next.push_back(o); replace(std::move(next)); return o.id;
 }
 std::string Project::duplicate(const std::string& objectId, std::uint64_t expectedRevision) {
+    return repeat(objectId, expectedRevision, 1, {});
+}
+std::vector<Object> Project::previewRepeat(const std::string& objectId, std::uint64_t expectedRevision,
+                                           unsigned copies, Vec3 spacing) const {
     requireRevision(expectedRevision);
     const Object* source = find(objectId);
     if (!source) fail("The target object does not exist in this scene.");
-    if (objects_.size() >= maxObjects) fail("This build supports up to 512 scene objects.");
-    Object copy = *source;
-    copy.id = newId();
-    // Reserve five bytes for the suffix, without splitting a UTF-8 character.
-    if (copy.name.size() > 235) {
-        std::size_t end = 235;
-        while ((static_cast<unsigned char>(copy.name[end]) & 0xc0) == 0x80) --end;
-        copy.name.resize(end);
+    if (copies == 0 || copies > maxObjects - objects_.size())
+        fail("The scene must fit within 512 objects including all copies.");
+    std::vector<Object> result;
+    result.reserve(copies);
+    for (unsigned i = 1; i <= copies; ++i) {
+        Object copy = *source;
+        copy.id = newId();
+        const auto suffix = copies == 1 ? std::string(" copy") : " copy " + std::to_string(i);
+        if (copy.name.size() + suffix.size() > 240) {
+            auto end = 240 - suffix.size();
+            while ((static_cast<unsigned char>(copy.name[end]) & 0xc0) == 0x80) --end;
+            copy.name.resize(end);
+        }
+        copy.name += suffix;
+        copy.position = {source->position.x + i*spacing.x, source->position.y + i*spacing.y,
+                         source->position.z + i*spacing.z};
+        validate(copy);
+        result.push_back(std::move(copy));
     }
-    copy.name += " copy";
-    validate(copy);
+    return result;
+}
+std::string Project::repeat(const std::string& objectId, std::uint64_t expectedRevision,
+                            unsigned copies, Vec3 spacing) {
+    auto additions = previewRepeat(objectId, expectedRevision, copies, spacing);
+    const auto index = find(objectId) - objects_.data();
     auto next = objects_;
-    next.insert(next.begin() + (source - objects_.data()) + 1, copy);
+    next.insert(next.begin()+index+1, additions.begin(), additions.end());
     replace(std::move(next));
-    return copy.id;
+    return additions.back().id;
 }
 void Project::remove(const std::string& objectId, std::uint64_t expectedRevision) {
     requireRevision(expectedRevision);

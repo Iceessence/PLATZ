@@ -1,3 +1,8 @@
+#include <windows.h>
+#include <objbase.h>
+#include <oleauto.h>
+#include <uiautomation.h>
+#include <wrl/client.h>
 #include "Project.hpp"
 #include <QCoreApplication>
 #include <QCryptographicHash>
@@ -6,9 +11,6 @@
 #include <QProcess>
 #include <QProcessEnvironment>
 #include <QTemporaryDir>
-#include <windows.h>
-#include <uiautomation.h>
-#include <wrl/client.h>
 #include <chrono>
 #include <iostream>
 #include <stdexcept>

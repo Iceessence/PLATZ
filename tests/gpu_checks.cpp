@@ -142,6 +142,8 @@ void run() {
     gpu.resize(376,250);
     gpu.draw(scene, camera);
     const auto restored = gpu.capture();
+    std::cout << "Restored viewport " << restored.width << 'x' << restored.height
+              << ", shell coverage " << coverage(restored,shell.token) << " pixels\n";
     check(restored.width == 376 && restored.height == 250 && coverage(restored, shell.token) > 500,
           "Restored viewport lost its scene or attachments");
     check(gpu.validationErrors() == 0, "Vulkan reported graphics validation errors");
