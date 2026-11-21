@@ -14,6 +14,8 @@ if(BUILD_TESTING)
     target_link_libraries(platz_core_tests PRIVATE platz_core)
     target_compile_definitions(platz_core_tests PRIVATE
         PLATZ_TEST_MESH="${PROJECT_SOURCE_DIR}/tests/assets/Oblique spire.glb"
-        PLATZ_TEST_REPLACEMENT="${PROJECT_SOURCE_DIR}/tests/assets/Low spire.glb")
+        PLATZ_TEST_REPLACEMENT="${PROJECT_SOURCE_DIR}/tests/assets/Low spire.glb"
+        PLATZ_TEST_MATERIALS="${PROJECT_SOURCE_DIR}/tests/assets/Color study.glb"
+        PLATZ_TEST_LEGACY_COLOR="${PROJECT_SOURCE_DIR}/tests/assets/Legacy colored block.glb")
     add_test(NAME core-project COMMAND platz_core_tests)
 endif()

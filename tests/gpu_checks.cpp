@@ -40,7 +40,7 @@ void profile(const std::filesystem::path& file) {
         case platz::Mesh::Imported: mesh = Mesh::Imported; break;
         }
         scene.push_back({static_cast<unsigned>(scene.size()) + 1, mesh, vector(object.position),
-            vector(object.rotation), vector(object.scale), vector(object.color),object.asset.data});
+            vector(object.rotation), vector(object.scale), vector(object.color),object.asset.data,object.slotColors});
     }
     TestSurface surface;
     check(surface.handle && SetWindowPos(surface.handle,nullptr,0,0,1280,720,SWP_NOZORDER|SWP_NOACTIVATE),
@@ -157,6 +157,32 @@ void run() {
     check(gpu.capture().tokens==restored.tokens,"Retiring the imported atlas changed built-in geometry");
     gpu.draw(std::span(&mesh,1),meshCamera);
     check(coverage(gpu.capture(),mesh.token)>300,"Re-uploading an imported atlas failed");
+
+    mesh.asset=platz::MeshAsset::load(PLATZ_TEST_MATERIALS);
+    meshCamera.yaw=0;
+    meshCamera.frameObject(mesh,376.f/250.f);
+    gpu.draw(std::span(&mesh,1),meshCamera);
+    const auto originalColors=gpu.capture();
+    mesh.slotColors={{0,{.25f,.15f,.92f}}};
+    gpu.draw(std::span(&mesh,1),meshCamera);
+    const auto editedColors=gpu.capture();
+    check(originalColors.tokens==editedColors.tokens,"Material changes disturbed object picking.");
+    int changesOnLeft=0, changesOnRight=0, untouchedMeshPixels=0;
+    for (size_t i=0;i<originalColors.tokens.size();++i) {
+        const auto initial=originalColors.rgba.begin()+4*i;
+        const auto result=editedColors.rgba.begin()+4*i;
+        if (!std::equal(initial,initial+4,result)) {
+            check(originalColors.tokens[i]==mesh.token && initial[0]>initial[1]+24 && initial[0]>initial[2]+24,
+                  "Material edit recolored a pixel outside the Copper slot.");
+            if (i%editedColors.width<editedColors.width/2) ++changesOnLeft;
+            else ++changesOnRight;
+        } else if (originalColors.tokens[i]==mesh.token) {
+            ++untouchedMeshPixels;
+        }
+    }
+    check(changesOnLeft>100 && changesOnRight>100 && untouchedMeshPixels>100,
+          "Both Copper primitives and the untouched Lagoon primitive were not rendered.");
+    std::cout<<"Shared material slot recolored separated primitives without changing the Lagoon slot or object IDs\n";
     check(gpu.validationErrors() == 0, "Vulkan reported graphics validation errors");
     std::cout << "Adapter: " << gpu.adapter() << "\n" << gpu.diagnostics() << "\n"
               << width << "x" << height << ", 3 objects, 11 draw + synchronous readbacks; median "

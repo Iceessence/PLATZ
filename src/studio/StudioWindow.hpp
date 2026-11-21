@@ -7,6 +7,7 @@
 
 class QAction;
 class QCloseEvent;
+class QComboBox;
 class QDockWidget;
 class QDoubleSpinBox;
 class QLabel;
@@ -36,6 +37,9 @@ private:
     QToolBar* tools_{};
     QListWidget* tree_{};
     QLineEdit *name_{}, *color_{};
+    QComboBox* materialSlot_{};
+    QPushButton* resetSlot_{};
+    std::string materialOwner_;
     std::array<QDoubleSpinBox*,9> axis_{};
     QLabel *projectTitle_{}, *mode_{}, *count_{}, *mesh_{}, *identity_{}, *backend_{}, *notice_{}, *recent_{}, *controls_{};
     QPushButton *play_{}, *save_{}, *add_{}, *swatch_{}, *recentOpen_{};
@@ -67,6 +71,7 @@ private:
     void toHub();
     void refresh(const std::string& preferredAsset = {});
     void syncInspector();
+    void syncMaterial(const platz::Object* object);
     void applyEdit(const std::function<void(platz::Object&)>& change);
     void finishActiveField();
     void select(const std::string& id, bool fromViewport);

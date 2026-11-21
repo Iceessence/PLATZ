@@ -15,7 +15,7 @@
 #include <limits>
 #include <cstdio>
 #include <stdexcept>
-#include <unordered_set>
+#include <unordered_map>
 
 namespace platz {
 namespace {
@@ -39,6 +39,9 @@ constexpr const char* objectsSql =
     "cb REAL NOT NULL,PRIMARY KEY(rev,seq),UNIQUE(rev,id))";
 constexpr const char* snapshotsSql =
     "CREATE TABLE snapshots(rev INTEGER PRIMARY KEY,object_count INTEGER NOT NULL CHECK(object_count>=0))";
+constexpr const char* slotColorsSql =
+    "CREATE TABLE slot_colors(rev INTEGER NOT NULL,object_id TEXT NOT NULL,slot INTEGER NOT NULL,"
+    "r REAL NOT NULL,g REAL NOT NULL,b REAL NOT NULL,PRIMARY KEY(rev,object_id,slot))";
 
 [[noreturn]] void fail(const std::string& message) { throw std::runtime_error(message); }
 
@@ -109,6 +112,14 @@ void validate(const Object& obj) {
     if (!in(obj.rotation,-36000,36000)) fail("Rotation must be finite and within 36,000 degrees.");
     if (!in(obj.scale,0.001f,10000)) fail("Scale must be between 0.001 and 10,000.");
     if (!in(obj.color,0,1)) fail("Material sRGB channels must be between 0 and 1.");
+    const auto slots=obj.asset.data ? obj.asset.data->materialSlots().size() : 0;
+    for (size_t i=0;i<obj.slotColors.size();++i) {
+        const auto& value=obj.slotColors[i];
+        if (value.slot>=slots || (i && obj.slotColors[i-1].slot>=value.slot))
+            fail("Invalid material slot reference.");
+        if (!in({value.srgb[0],value.srgb[1],value.srgb[2]},0,1))
+            fail("Material slot sRGB channels must be between 0 and 1.");
+    }
 }
 
 struct Database {
@@ -187,7 +198,7 @@ struct Metadata { std::string id,scene,name,token; std::uint64_t head; int versi
 Metadata readMeta(Database& db) {
     if (scalar(db,"PRAGMA application_id") != applicationId) fail("This file is not a PLATZ project.");
     auto version = scalar(db,"PRAGMA user_version");
-    if (version<1 || version>4) fail("Unsupported PLATZ project version. Open it with a compatible build.");
+    if (version<1 || version>5) fail("Unsupported PLATZ project version. Open it with a compatible build.");
     Statement schema(db,"SELECT name,sql FROM sqlite_schema WHERE sql IS NOT NULL ORDER BY name");
     auto checkTable = [&](const char* name, const char* definition) {
         if (!schema.row() || schema.str(0) != name || schema.str(1) != definition)
@@ -197,6 +208,7 @@ Metadata readMeta(Database& db) {
     if (version>=4) checkTable("mesh_library",meshLibrarySql);
     checkTable("objects", objectsSql);
     checkTable("project", projectSql);
+    if (version>=5) checkTable("slot_colors",slotColorsSql);
     if (version >= 2) checkTable("snapshots", snapshotsSql);
     if (schema.row()) fail("Unrecognized project schema. The original file was preserved.");
     Statement q(db,"SELECT id,scene,name,token,head FROM project WHERE singleton=1");
@@ -240,7 +252,7 @@ std::vector<Object> readObjects(Database& db, std::uint64_t rev, int version, Me
     Statement q(db,"SELECT id,name,mesh,px,py,pz,rx,ry,rz,sx,sy,sz,cr,cg,cb FROM objects WHERE rev=? ORDER BY seq LIMIT 513");
     q.bind(1,static_cast<std::int64_t>(rev));
     std::vector<Object> result;
-    std::unordered_set<std::string> ids;
+    std::unordered_map<std::string,size_t> ids;
     while (q.row()) {
         if (result.size() >= maxObjects) fail("This build supports up to 512 scene objects.");
         const auto key=q.str(2);
@@ -256,11 +268,25 @@ std::vector<Object> readObjects(Database& db, std::uint64_t rev, int version, Me
                 asset=library.emplace(digest,readMesh(db,key,o.name,assetBytes)).first;
             }
             o.asset=asset->second.asset;
+            if (version<5 && o.asset.data->materialSlots().front().sourceColor)
+                o.slotColors.push_back({0,{o.color.x,o.color.y,o.color.z}});
         }
-        validate(o);
-        if (!ids.insert(o.id).second) fail("Duplicate object identity in project.");
+        if (!ids.emplace(o.id,result.size()).second) fail("Duplicate object identity in project.");
         result.push_back(std::move(o));
     }
+    if (version>=5) {
+        Statement colors(db,"SELECT object_id,slot,r,g,b FROM slot_colors WHERE rev=? ORDER BY object_id,slot");
+        colors.bind(1,static_cast<std::int64_t>(rev));
+        while (colors.row()) {
+            const auto object=ids.find(colors.str(0));
+            const auto index=colors.integer(1);
+            if (object==ids.end() || index<0 || index>=MeshAsset::maxPrimitives)
+                fail("Saved color references an invalid material slot.");
+            result[object->second].slotColors.push_back(
+                {static_cast<std::uint32_t>(index),{colors.number(2),colors.number(3),colors.number(4)}});
+        }
+    }
+    for (const auto& object:result) validate(object);
     if (version >= 2) {
         Statement count(db, "SELECT object_count FROM snapshots WHERE rev=?");
         count.bind(1,static_cast<std::int64_t>(rev));
@@ -332,6 +358,19 @@ void putObjects(Database& db, const std::vector<Object>& objects, std::uint64_t 
         ins.check(sqlite3_reset(ins.stmt));
     }
 }
+void putSlotColors(Database& db, const std::vector<Object>& objects, std::uint64_t rev) {
+    Statement write(db,"INSERT INTO slot_colors VALUES(?,?,?,?,?,?)");
+    for (const auto& object:objects) {
+        for (const auto& color:object.slotColors) {
+            write.bind(1,static_cast<std::int64_t>(rev));
+            write.bind(2,object.id);
+            write.bind(3,static_cast<std::int64_t>(color.slot));
+            for (int i=0;i<3;++i) write.bind(i+4,color.srgb[i]);
+            write.done();
+            write.check(sqlite3_reset(write.stmt));
+        }
+    }
+}
 std::filesystem::path reserveTemp(const fs::path& dest) {
     auto temp = dest;
     temp += ".building-" + newId();
@@ -379,6 +418,17 @@ const char* meshName(Mesh mesh) {
     case Mesh::Cylinder: return "Cylinder";
     }
     fail("Unsupported source mesh.");
+}
+
+void Object::setSlotColor(std::uint32_t slot, std::optional<std::array<float,3>> srgb) {
+    auto match=std::lower_bound(slotColors.begin(),slotColors.end(),slot,
+        [](const SlotColor& color,std::uint32_t target){return color.slot<target;});
+    if (match!=slotColors.end() && match->slot==slot) {
+        if (srgb) match->srgb=*srgb;
+        else slotColors.erase(match);
+    } else if (srgb) {
+        slotColors.insert(match,{slot,*srgb});
+    }
 }
 
 Project Project::create(const fs::path& path, const std::string& name) {
@@ -508,6 +558,7 @@ void Project::assignMesh(const std::string& objectId, const std::string& digest,
     auto replacement=*object;
     replacement.mesh=Mesh::Imported;
     replacement.asset=findMesh(scene_.meshes,digest).asset;
+    if (replacement.asset!=object->asset) replacement.slotColors.clear();
     edit(replacement,expectedRevision);
 }
 std::string Project::replaceMeshInstances(const std::string& digest, const std::filesystem::path& source,
@@ -520,6 +571,7 @@ std::string Project::replaceMeshInstances(const std::string& digest, const std::
     bool used=false;
     for (auto& object: next.objects) {
         if (object.asset==original) {
+            if (object.asset!=replacement) object.slotColors.clear();
             object.asset=replacement;
             used=true;
         }
@@ -627,9 +679,14 @@ void Project::save() {
             if (meta.version<3) db.exec(assetsSql);
             db.exec(meshLibrarySql);
             putLibrary(db,saved_.meshes,head_);
-            db.exec("PRAGMA user_version=4");
+        }
+        if (meta.version<5) {
+            db.exec(slotColorsSql);
+            putSlotColors(db,saved_.objects,head_);
+            db.exec("PRAGMA user_version=5");
         }
         putLibrary(db,scene_.meshes,revision_);
+        putSlotColors(db,scene_.objects,revision_);
     }
     putObjects(db,scene_.objects,revision_);
     Statement update(db,"UPDATE project SET head=?,token=? WHERE singleton=1 AND token=?");
@@ -644,6 +701,9 @@ void Project::save() {
         Statement pruneLibrary(db,"DELETE FROM mesh_library WHERE rev < ?");
         pruneLibrary.bind(1,static_cast<std::int64_t>(head_));
         pruneLibrary.done();
+        Statement pruneColors(db,"DELETE FROM slot_colors WHERE rev < ?");
+        pruneColors.bind(1,static_cast<std::int64_t>(head_));
+        pruneColors.done();
         db.exec("DELETE FROM assets WHERE key NOT IN (SELECT key FROM mesh_library)");
     }
     if(scalar(db,"PRAGMA page_count")*scalar(db,"PRAGMA page_size")>maxFileBytes)

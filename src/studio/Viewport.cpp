@@ -35,7 +35,7 @@ void Viewport::setScene(const std::vector<platz::Object>& objects, const std::st
         ids_.push_back(object.id);
         const auto token = static_cast<std::uint32_t>(ids_.size());
         draws_.push_back({token, toEngine(object.mesh), toEngine(object.position), toEngine(object.rotation),
-                          toEngine(object.scale), toEngine(object.color),object.asset.data});
+                          toEngine(object.scale), toEngine(object.color),object.asset.data,object.slotColors});
         if (selection == object.id) selection_ = token;
     }
     update();

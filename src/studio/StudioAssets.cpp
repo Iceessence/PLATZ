@@ -144,8 +144,9 @@ void StudioWindow::refreshAssets(const std::string& preferred) {
             item->setData(0,Qt::UserRole,QString::fromStdString(digest));
             item->setData(1,Qt::DisplayRole,uses[digest]);
             item->setTextAlignment(1,Qt::AlignRight|Qt::AlignVCenter);
-            item->setToolTip(0,tr("%1 vertices · %2 triangles\nSHA-256 %3")
+            item->setToolTip(0,tr("%1 vertices · %2 triangles · %3 material slots\nSHA-256 %4")
                 .arg(mesh.asset.data->vertices().size()).arg(mesh.asset.data->indices().size()/3)
+                .arg(mesh.asset.data->materialSlots().size())
                 .arg(QString::fromStdString(digest)));
             if (digest==selected) assetList_->setCurrentItem(item);
         }

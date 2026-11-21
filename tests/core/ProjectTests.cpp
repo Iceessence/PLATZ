@@ -308,7 +308,7 @@ void assetLibrarySuite() {
     auto legacy=Project::create(migration.source,"Legacy v3 library");
     const auto legacyId=legacy.importMesh(PLATZ_TEST_MESH,legacy.revision());
     legacy.save();
-    alter(migration.source,"DROP TABLE mesh_library; PRAGMA user_version=3");
+    alter(migration.source,"DROP TABLE slot_colors; DROP TABLE mesh_library; PRAGMA user_version=3");
     auto migrated=Project::open(migration.source);
     expect(migrated.find(legacyId) && migrated.meshLibrary().contains(originalDigest),
            "Legacy project failed to discover its referenced mesh.");
@@ -322,12 +322,95 @@ void assetLibrarySuite() {
            "v3 migration lost the previous saved library.");
     pass("legacy v3 mesh paths migrate without changing objects or prior revisions");
 }
+
+void materialSuite() {
+    Fixture fixture;
+    auto project=Project::create(fixture.source,"Material slots");
+    const auto id=project.importMesh(PLATZ_TEST_MATERIALS,project.revision());
+    const auto original=*project.find(id);
+    const auto asset=original.asset.data;
+    expect(asset->primitives().size()==3 && asset->materialSlots().size()==2 &&
+           asset->primitives()[0].slot==asset->primitives()[2].slot &&
+           asset->primitives()[0].slot!=asset->primitives()[1].slot,"GLB primitive/material mapping is incorrect.");
+    expect(asset->indices()[asset->primitives()[1].firstIndex]==36 &&
+           asset->indices()[asset->primitives()[2].firstIndex]==72,"Primitive indices were not rebased.");
+    const auto copper=asset->colorForSlot(0,{});
+    expect(copper[0]>.90f && copper[0]<.93f && copper[1]>.32f && copper[1]<.34f,
+           "Linear GLB base color was not converted to sRGB.");
+    project.save();
+    Runtime runtime(project);
+    auto edited=original;
+    edited.setSlotColor(0,std::array{.4f,.1f,.8f});
+    auto invalid=edited;
+    invalid.setSlotColor(2,std::array{.8f,.2f,.1f});
+    rejects([&]{project.edit(invalid,project.revision());});
+    invalid=edited;
+    invalid.setSlotColor(0,std::array{.8f,-.2f,.1f});
+    rejects([&]{project.edit(invalid,project.revision());});
+    expect(!project.dirty(),"Rejected slot edits changed authoring data.");
+    auto command=project.stage(edited,project.revision());
+    project.apply(command);
+    rejects([&]{project.apply(command);});
+    expect(runtime.objects().back()==original,"Authoring slot edits leaked into Play.");
+    project.undo(); expect(*project.find(id)==original,"Undo lost original slot colors.");
+    project.redo(); expect(*project.find(id)==edited,"Redo lost the edited slot.");
+    auto twin=project.duplicate(id,project.revision());
+    expect(project.find(twin)->slotColors==edited.slotColors,"Duplication omitted material overrides.");
+    auto reset=edited;
+    reset.setSlotColor(0,std::nullopt);
+    project.edit(reset,project.revision());
+    expect(project.find(id)->slotColors.empty() && project.find(twin)->slotColors==edited.slotColors,
+           "Reset changed the other instance of the same source.");
+    project.undo();
+    project.save();
+    auto reopened=Project::open(fixture.source);
+    expect(reopened.objects()==project.objects(),"Saved/imported material overrides did not round-trip.");
+    auto replacement=reopened.importMeshAsset(PLATZ_TEST_MESH,reopened.revision());
+    reopened.assignMesh(id,replacement,reopened.revision());
+    expect(reopened.find(id)->slotColors.empty() && reopened.find(twin)->slotColors==edited.slotColors,
+           "A replacement reused unrelated slot colors or changed the other instance.");
+    reopened.restorePrevious();
+    expect(*reopened.find(id)==original && !reopened.find(twin),"Previous revision had the wrong material edits.");
+    pass("material groups, revision-bound validation, instance isolation, undo, assignment and persistence");
+
+    Fixture legacyFixture;
+    auto old=Project::create(legacyFixture.source,"Flat color from v4");
+    const auto legacyId=old.importMesh(PLATZ_TEST_LEGACY_COLOR,old.revision());
+    old.save();
+    alter(legacyFixture.source,"DROP TABLE slot_colors; PRAGMA user_version=4");
+    auto migrated=Project::open(legacyFixture.source);
+    auto legacy=*migrated.find(legacyId);
+    const std::array expected{legacy.color.x,legacy.color.y,legacy.color.z};
+    expect(legacy.slotColors.size()==1 && legacy.slotColors.front().srgb==expected &&
+           legacy.asset.data->colorForSlot(0,expected,legacy.slotColors)==expected,
+           "Opening a v4 project changed the old flat object color.");
+    auto named=legacy;
+    named.name="Migrated object";
+    migrated.edit(named,migrated.revision());
+    migrated.save();
+    auto upgraded=Project::open(legacyFixture.source);
+    expect(upgraded.objects()==migrated.objects(),"v5 did not persist the migrated override.");
+    upgraded.restorePrevious();
+    expect(*upgraded.find(legacyId)==legacy,"Migration lost the prior revision's appearance.");
+    pass("v4 flat-color appearance and previous revision preserved through schema v5 migration");
+}
 }
 
 int main(int argc, char** argv) {
     try {
         if(argc==3 && std::string(argv[1])=="--interrupt-assets")
-            alter(argv[2],"BEGIN IMMEDIATE; DELETE FROM mesh_library; DELETE FROM assets; UPDATE project SET head=777",true);
+            alter(argv[2],"BEGIN IMMEDIATE; DELETE FROM slot_colors; DELETE FROM mesh_library; DELETE FROM assets; "
+                          "UPDATE project SET head=777",true);
+        if(argc==3 && std::string(argv[1])=="--extend-validation-materials") {
+            auto scene=Project::open(argv[2]);
+            const auto id=scene.importMesh(PLATZ_TEST_MATERIALS,scene.revision());
+            auto object=*scene.find(id);
+            object.position={-0.25f,0,1.55f};
+            object.scale={.82f,.82f,.82f};
+            scene.edit(object,scene.revision());
+            scene.save();
+            return 0;
+        }
         if(argc==3 && std::string(argv[1])=="--extend-validation-library") {
             auto scene=Project::open(argv[2]);
             scene.importMeshAsset(PLATZ_TEST_REPLACEMENT,scene.revision());
@@ -347,6 +430,7 @@ int main(int argc, char** argv) {
         }
         suite(std::filesystem::absolute(argv[0]));
         assetLibrarySuite();
+        materialSuite();
         std::cout<<passed<<" Core scenarios passed.\n";
         return 0;
     } catch (const std::exception& e) {

@@ -3,6 +3,7 @@
 #include "Viewport.hpp"
 #include <QAction>
 #include <QCloseEvent>
+#include <QComboBox>
 #include <QDockWidget>
 #include <QDoubleSpinBox>
 #include <QFileDialog>
@@ -15,6 +16,7 @@
 #include <QPushButton>
 #include <QScopedValueRollback>
 #include <QSettings>
+#include <QSignalBlocker>
 #include <QShortcut>
 #include <QStackedWidget>
 #include <QStatusBar>
@@ -271,11 +273,11 @@ void StudioWindow::syncInspector() {
     repeat_->setEnabled(editable);
     erase_->setEnabled(editable);
     updateAssetActions();
+    syncMaterial(object);
     if (!object) {
-        name_->clear(); mesh_->setText(tr("Select an object")); identity_->clear(); color_->clear();
+        name_->clear(); mesh_->setText(tr("Select an object")); identity_->clear();
         mesh_->setToolTip({});
         for(auto* field:axis_) field->setValue(0);
-        swatch_->setStyleSheet({});
         return;
     }
     name_->setText(QString::fromStdString(object->name));
@@ -289,10 +291,41 @@ void StudioWindow::syncInspector() {
         const auto v=vectors[g];
         axis_[g*3]->setValue(v.x); axis_[g*3+1]->setValue(v.y); axis_[g*3+2]->setValue(v.z);
     }
-    const auto c=object->color;
-    const QString rgb=QColor::fromRgbF(c.x,c.y,c.z).name().toUpper();
-    color_->setText(rgb);
-    swatch_->setStyleSheet(QString("background-color: %1").arg(rgb));
+}
+void StudioWindow::syncMaterial(const platz::Object* object) {
+    const QSignalBlocker block(materialSlot_);
+    const auto* asset=object ? object->asset.data.get() : nullptr;
+    const auto owner=asset ? object->id+asset->digest() : std::string{};
+    materialSlot_->setVisible(asset);
+    resetSlot_->setVisible(asset);
+    if (owner!=materialOwner_) {
+        materialOwner_=owner;
+        materialSlot_->clear();
+        if (asset) {
+            const auto& materials=asset->materialSlots();
+            for (size_t i=0;i<materials.size();++i) {
+                const auto name=QString::fromStdString(materials[i].name).simplified();
+                materialSlot_->addItem(name.isEmpty() ? tr("Slot %1").arg(i+1) :
+                                                        tr("%1. %2").arg(i+1).arg(name));
+            }
+        }
+    }
+    if (!object) {
+        color_->clear();
+        swatch_->setStyleSheet({});
+        resetSlot_->setEnabled(false);
+        return;
+    }
+    auto value=std::array{object->color.x,object->color.y,object->color.z};
+    const int index=materialSlot_->currentIndex();
+    const bool hasSlot=asset && index>=0;
+    const bool overridden=hasSlot && std::any_of(object->slotColors.begin(),object->slotColors.end(),
+        [index](const auto& color){return color.slot==static_cast<unsigned>(index);});
+    resetSlot_->setEnabled(overridden && !runtime_);
+    if (hasSlot) value=asset->colorForSlot(index,value,object->slotColors);
+    const auto hex=QColor::fromRgbF(value[0],value[1],value[2]).name().toUpper();
+    color_->setText(hex);
+    swatch_->setStyleSheet(QString("background-color: %1").arg(hex));
 }
 void StudioWindow::applyEdit(const std::function<void(platz::Object&)>& change) {
     if (refreshing_ || runtime_ || !project_) return;

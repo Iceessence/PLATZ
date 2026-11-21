@@ -20,6 +20,7 @@ struct DrawObject {
     Vec3 scale{1, 1, 1};
     Vec3 color{0.65f, 0.65f, 0.65f}; // sRGB
     std::shared_ptr<const platz::MeshAsset> asset{};
+    std::vector<platz::SlotColor> slotColors;
 };
 
 struct Camera {

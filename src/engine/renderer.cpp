@@ -34,6 +34,15 @@ struct Vertex {
 struct MeshRange {
     UINT startIndex, count;
 };
+struct ImportedRange {
+    MeshRange range;
+    std::uint32_t slot;
+};
+struct SceneDraw {
+    const DrawObject* object;
+    MeshRange range;
+    Vec3 color;
+};
 struct Geometry {
     std::vector<Vertex> vertices;
     std::vector<std::uint32_t> indices;
@@ -229,7 +238,7 @@ struct Renderer::Impl {
     Buffer pendingGeometry, geometryStaging;
     VkDeviceSize indexOffset{}, stride{};
     std::array<MeshRange, 4> ranges{};
-    std::map<std::string,MeshRange> imported;
+    std::map<std::string,std::vector<ImportedRange>> imported;
     VkSwapchainKHR chain{};
     std::vector<PresentImage> images;
     VkExtent2D extent{}, requested{};
@@ -243,8 +252,8 @@ struct Renderer::Impl {
     void makePipelines();
     void upload(const std::map<std::string,const platz::MeshAsset*>& assets);
     void finishTransfer();
-    void prepare(Frame&, std::span<const DrawObject>, const Camera&, uint32_t);
-    void record(Frame&, std::span<const DrawObject>, uint32_t);
+    void prepare(Frame&, std::span<const SceneDraw>, const Camera&, uint32_t);
+    void record(Frame&, std::span<const SceneDraw>, uint32_t);
     void draw(std::span<const DrawObject>, const Camera&, uint32_t);
     Capture read(uint32_t, uint32_t, uint32_t, uint32_t, bool);
     ~Impl();
@@ -340,10 +349,13 @@ void Renderer::Impl::finishTransfer() {
 }
 void Renderer::Impl::upload(const std::map<std::string,const platz::MeshAsset*>& assets) {
     auto source = makeGeometry();
-    std::map<std::string,MeshRange> newRanges;
+    std::map<std::string,std::vector<ImportedRange>> newRanges;
     for(const auto& [digest,asset]:assets) {
         const auto base=static_cast<uint32_t>(source.vertices.size());
-        newRanges.emplace(digest,MeshRange{static_cast<UINT>(source.indices.size()),static_cast<UINT>(asset->indices().size())});
+        auto& meshRanges=newRanges[digest];
+        const auto firstIndex=static_cast<UINT>(source.indices.size());
+        for (const auto& primitive:asset->primitives())
+            meshRanges.push_back({{firstIndex+primitive.firstIndex,primitive.indexCount},primitive.slot});
         for(const auto& v:asset->vertices()) source.vertex(
             {v.position[0],v.position[1],v.position[2]}, {v.normal[0],v.normal[1],v.normal[2]});
         for(auto index:asset->indices()) source.indices.push_back(base+index);
@@ -578,7 +590,7 @@ void Renderer::Impl::makePipelines() {
     pipelineMs = std::chrono::duration<double, std::milli>(Clock::now() - begin).count();
 }
 
-void Renderer::Impl::prepare(Frame& f, std::span<const DrawObject> objects, const Camera& camera,
+void Renderer::Impl::prepare(Frame& f, std::span<const SceneDraw> draws, const Camera& camera,
                              uint32_t selected) {
     static_assert(offsetof(Constants, viewProjection) == shaders::offset::viewProjection &&
                   offsetof(Constants, world) == shaders::offset::world);
@@ -589,7 +601,7 @@ void Renderer::Impl::prepare(Frame& f, std::span<const DrawObject> objects, cons
     static_assert(offsetof(Constants, token) == shaders::offset::token &&
                   offsetof(Constants, mesh) == shaders::offset::meshKind);
     static_assert(sizeof(Constants) <= shaders::sceneSize && shaders::sceneSet == 0);
-    auto slots = objects.size() + 1;
+    auto slots = draws.size() + 1;
     if (slots > std::min<VkDeviceSize>(64ull << 20, UINT32_MAX) / stride)
         throw std::runtime_error("Scene draw parameters exceed the per-frame resource budget.");
     const auto used = slots * stride;
@@ -613,28 +625,36 @@ void Renderer::Impl::prepare(Frame& f, std::span<const DrawObject> objects, cons
     XMStoreFloat4x4(&c.viewProjection, view * projection);
     XMStoreFloat3(&c.eye, eye);
     c.selected = selected;
-    auto store = [&](size_t i, XMMATRIX world) {
+    auto transform = [&](XMMATRIX world) {
         XMStoreFloat4x4(&c.world, world);
         XMStoreFloat4x4(&c.normal, XMMatrixTranspose(XMMatrixInverse(nullptr, world)));
+    };
+    auto store = [&](size_t i) {
         std::memcpy(static_cast<std::byte*>(f.uniforms.mapped) + i * stride, &c, sizeof(c));
     };
     c.mesh = 3;
-    store(0, XMMatrixScaling(1800, 1, 1800) * XMMatrixTranslation(camera.target[0], -.012f, camera.target[2]));
-    for (size_t i = 0; i < objects.size(); ++i) {
-        const auto& o = objects[i];
-        auto rotation = XMMatrixRotationX(XMConvertToRadians(o.rotation[0])) *
-                        XMMatrixRotationY(XMConvertToRadians(o.rotation[1])) *
-                        XMMatrixRotationZ(XMConvertToRadians(o.rotation[2]));
-        c.mesh = static_cast<uint32_t>(o.mesh);
-        c.color = o.color;
-        c.token = o.token;
-        store(i + 1, XMMatrixScalingFromVector(vector(o.scale)) * rotation *
-                         XMMatrixTranslationFromVector(vector(o.position)));
+    transform(XMMatrixScaling(1800, 1, 1800) * XMMatrixTranslation(camera.target[0], -.012f, camera.target[2]));
+    store(0);
+    const DrawObject* previous=nullptr;
+    for (size_t i = 0; i < draws.size(); ++i) {
+        const auto& o = *draws[i].object;
+        if (&o!=previous) {
+            const auto rotation = XMMatrixRotationX(XMConvertToRadians(o.rotation[0])) *
+                                  XMMatrixRotationY(XMConvertToRadians(o.rotation[1])) *
+                                  XMMatrixRotationZ(XMConvertToRadians(o.rotation[2]));
+            transform(XMMatrixScalingFromVector(vector(o.scale)) * rotation *
+                      XMMatrixTranslationFromVector(vector(o.position)));
+            c.mesh = static_cast<uint32_t>(o.mesh);
+            c.token = o.token;
+            previous=&o;
+        }
+        c.color = draws[i].color;
+        store(i + 1);
     }
     check(vmaFlushAllocation(d.allocator, f.uniforms.allocation, 0, used), "Flushing scene parameters");
 }
 
-void Renderer::Impl::record(Frame& f, std::span<const DrawObject> objects, uint32_t imageIndex) {
+void Renderer::Impl::record(Frame& f, std::span<const SceneDraw> draws, uint32_t imageIndex) {
     auto cmd = f.cmd;
     startCommands(d.device, f.pool, cmd);
     if (f.timing) {
@@ -694,11 +714,8 @@ void Renderer::Impl::record(Frame& f, std::span<const DrawObject> objects, uint3
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ground);
     submit(0, ranges[3]);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-    for (size_t i = 0; i < objects.size(); ++i)
-        if (objects[i].token && objects[i].asset)
-            submit(i+1,imported.at(objects[i].asset->digest()));
-        else if (objects[i].token && static_cast<uint32_t>(objects[i].mesh) < 3)
-            submit(i + 1, ranges[static_cast<uint32_t>(objects[i].mesh)]);
+    for (size_t i = 0; i < draws.size(); ++i)
+        submit(i+1,draws[i].range);
     vkCmdEndRendering(cmd);
     for (auto* image : {&f.color, &f.ids})
         imageBarrier(cmd, image->handle, image->aspect, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
@@ -731,6 +748,19 @@ void Renderer::Impl::draw(std::span<const DrawObject> objects, const Camera& cam
     for(const auto& object:objects) if(object.asset) assets.try_emplace(object.asset->digest(),object.asset.get());
     if(assets.size()!=imported.size() || !std::equal(assets.begin(),assets.end(),imported.begin(),
             [](const auto& a,const auto& b){return a.first==b.first;})) upload(assets);
+    std::vector<SceneDraw> draws;
+    draws.reserve(objects.size());
+    for (const auto& object:objects) {
+        if (!object.token) continue;
+        if (object.asset) {
+            for (const auto& primitive:imported.at(object.asset->digest())) {
+                const auto color=object.asset->colorForSlot(primitive.slot,object.color,object.slotColors);
+                draws.push_back({&object,primitive.range,color});
+            }
+        } else if (const auto kind=static_cast<uint32_t>(object.mesh); kind<3) {
+            draws.push_back({&object,ranges[kind],object.color});
+        }
+    }
     auto& f = frames[current];
     check(vkWaitForFences(d.device, 1, &f.fence, VK_TRUE, timeout), "Reusing completed frame");
     if (f.rendered && f.timing) {
@@ -742,7 +772,7 @@ void Renderer::Impl::draw(std::span<const DrawObject> objects, const Camera& cam
         gpuMs = double((times[1] - times[0]) & mask) * d.properties.limits.timestampPeriod / 1e6;
     }
     vmaSetCurrentFrameIndex(d.allocator, ++frameNumber);
-    prepare(f, objects, camera, selected);
+    prepare(f, draws, camera, selected);
     uint32_t idx{};
     VkResult acquired = vkAcquireNextImageKHR(d.device, chain, timeout, f.acquired, {}, &idx);
     if (acquired == VK_ERROR_OUT_OF_DATE_KHR) {
@@ -753,7 +783,7 @@ void Renderer::Impl::draw(std::span<const DrawObject> objects, const Camera& cam
     if (acquired != VK_SUBOPTIMAL_KHR)
         check(acquired, "Acquiring display image");
     pendingResize = acquired == VK_SUBOPTIMAL_KHR;
-    record(f, objects, idx);
+    record(f, draws, idx);
     VkSemaphoreSubmitInfo wait{VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO};
     wait.semaphore = f.acquired;
     wait.stageMask = VK_PIPELINE_STAGE_2_COPY_BIT;

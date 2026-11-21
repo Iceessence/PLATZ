@@ -2,6 +2,7 @@
 #include "Appearance.hpp"
 #include "Viewport.hpp"
 #include <QColorDialog>
+#include <QComboBox>
 #include <QDialogButtonBox>
 #include <QFormLayout>
 #include <QSpinBox>
@@ -268,6 +269,25 @@ void StudioWindow::buildInspector() {
         box->addLayout(row);
     }
     section(box,tr("MATERIAL"));
+    auto* slotControls=new QHBoxLayout;
+    materialSlot_=new QComboBox;
+    materialSlot_->setObjectName("materialSlot");
+    materialSlot_->setAccessibleName(tr("Material slot"));
+    materialSlot_->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+    materialSlot_->setMinimumContentsLength(10);
+    slotControls->addWidget(materialSlot_,1);
+    resetSlot_=button(tr("Reset"),"resetSlotColor");
+    resetSlot_->setAccessibleName(tr("Reset material slot color"));
+    resetSlot_->setToolTip(tr("Restore the source color for this slot."));
+    slotControls->addWidget(resetSlot_);
+    box->addLayout(slotControls);
+    connect(materialSlot_,&QComboBox::currentIndexChanged,this,[this]{
+        if (!refreshing_ && project_ && !runtime_) syncMaterial(project_->find(selected_));
+    });
+    connect(resetSlot_,&QPushButton::clicked,this,[this]{
+        const auto slot=materialSlot_->currentIndex();
+        if (slot>=0) applyEdit([slot](platz::Object& o){o.setSlotColor(slot,std::nullopt);});
+    });
     box->addWidget(label(tr("Base color  ·  sRGB"),"minor"));
     auto* material = new QHBoxLayout;
     swatch_=button({},"colorPicker");
@@ -283,7 +303,12 @@ void StudioWindow::buildInspector() {
     box->addLayout(material);
     auto setColor = [this](QColor value) {
         if (!value.isValid()) { notify(tr("Enter a six-digit hex color, for example #89D6AE.")); syncInspector(); return; }
-        applyEdit([value](platz::Object& o){o.color={float(value.redF()),float(value.greenF()),float(value.blueF())};});
+        const auto slot=materialSlot_->currentIndex();
+        const std::array rgb{float(value.redF()),float(value.greenF()),float(value.blueF())};
+        applyEdit([slot,rgb](platz::Object& o){
+            if (o.asset.data && slot>=0) o.setSlotColor(slot,rgb);
+            else o.color={rgb[0],rgb[1],rgb[2]};
+        });
     };
     connect(color_,&QLineEdit::editingFinished,this,[this,setColor]{
         if (!color_->isModified()) return;

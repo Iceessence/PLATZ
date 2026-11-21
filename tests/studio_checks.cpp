@@ -3,6 +3,7 @@
 #include "Viewport.hpp"
 #include <QApplication>
 #include <QAction>
+#include <QComboBox>
 #include <QDockWidget>
 #include <QInputMethodEvent>
 #include <QMenu>
@@ -238,6 +239,77 @@ void exerciseAssetLibrary(QTemporaryDir& dir) {
     }
     std::cout<<"Assets panel import, placement, assignment, GPU replacement, undo/redo, Play, removal and reopen passed\n";
 }
+void exerciseMaterialSlots(QTemporaryDir& dir) {
+    const auto file=dir.filePath("Material slots.platz");
+    const auto authored="#5A26C8";
+    std::string objectId;
+    Capture painted;
+    {
+        StudioWindow window;
+        expose(window);
+        fileAction(window,Qt::Key_N,file);
+        chooseFile(PLATZ_TEST_MATERIALS,[&]{control<QAction>(window,"importGlb")->trigger();});
+        auto* tree=control<QListWidget>(window,"sceneTree");
+        auto* viewport=static_cast<Viewport*>(control<QWidget>(window,"viewport"));
+        auto* materials=control<QComboBox>(window,"materialSlot");
+        auto* color=control<QLineEdit>(window,"materialColor");
+        auto* reset=control<QPushButton>(window,"resetSlotColor");
+        check(tree->count()==5 && materials->isVisible() && materials->count()==2 &&
+              materials->itemText(0).contains("Copper") && materials->itemText(1).contains("Lagoon"),
+              "Imported material slots were not listed in the Inspector.");
+        objectId=tree->currentItem()->data(Qt::UserRole).toString().toStdString();
+        enterText(control<QDoubleSpinBox>(window,"positionY"),"3.5");
+        viewport->setFocus();
+        QTest::keyClick(viewport,Qt::Key_F);
+        const auto base=settledFrame(*viewport);
+        const auto sourceColor=color->text();
+        materials->setCurrentIndex(1);
+        const auto lagoon=color->text();
+        check(sourceColor!=lagoon && !reset->isEnabled(),"GLB defaults are not exposed correctly.");
+        materials->setCurrentIndex(0);
+        enterText(color,authored);
+        painted=settledFrame(*viewport);
+        check(base.tokens==painted.tokens && base.rgba!=painted.rgba && reset->isEnabled(),
+              "Painting a slot did not recolor its geometry.");
+        materials->setCurrentIndex(1);
+        check(color->text()==lagoon && !reset->isEnabled(),"A slot edit changed the other slot.");
+        materials->setCurrentIndex(0);
+        reset->click();
+        check(color->text()==sourceColor && settledFrame(*viewport).rgba==base.rgba,
+              "Reset did not restore the original GPU color.");
+        viewport->setFocus();
+        QTest::keyClick(viewport,Qt::Key_Z,Qt::ControlModifier);
+        check(settledFrame(*viewport).rgba==painted.rgba,"Reset could not be undone.");
+        auto* play=control<QPushButton>(window,"playButton");
+        QTest::mouseClick(play,Qt::LeftButton);
+        check(!materials->isEnabled(),"Material authoring remained active during Play.");
+        const auto point=visiblePoint(settledFrame(*viewport),5,*viewport);
+        QTest::mouseClick(viewport,Qt::LeftButton,{},point);
+        check(settledFrame(*viewport).tokens!=painted.tokens,"Play did not turn the multi-primitive object.");
+        QTest::mouseClick(play,Qt::LeftButton);
+        check(settledFrame(*viewport).rgba==painted.rgba,"Play changed authoring material or transforms.");
+        QTest::mouseClick(control<QPushButton>(window,"saveButton"),Qt::LeftButton);
+        check(window.close(),"Material project did not close after Save.");
+    }
+    {
+        StudioWindow window;
+        expose(window);
+        fileAction(window,Qt::Key_O,file);
+        auto* viewport=static_cast<Viewport*>(control<QWidget>(window,"viewport"));
+        auto* tree=control<QListWidget>(window,"sceneTree");
+        tree->setCurrentRow(4);
+        check(tree->currentItem()->data(Qt::UserRole).toString().toStdString()==objectId &&
+              control<QLineEdit>(window,"materialColor")->text()==authored,
+              "Reopened project lost the object ID or slot color.");
+        viewport->setFocus();
+        QTest::keyClick(viewport,Qt::Key_F);
+        const auto reopened=settledFrame(*viewport);
+        check(reopened.tokens==painted.tokens && reopened.rgba==painted.rgba,
+              "Reopened material rendering differs from saved appearance.");
+        check(window.close(),"Reopened material project did not close.");
+    }
+    std::cout<<"Material slot selection, editing, reset/undo, Play and pixel-identical reopen passed\n";
+}
 void exercise(const QString& path, bool create) {
     const std::filesystem::path file(path.toStdWString());
     std::string projectId, sceneId, editedId;
@@ -408,5 +480,6 @@ int main(int argc, char** argv) {
         exercise(copy, false);
         exerciseImport(temp);
         exerciseAssetLibrary(temp);
+        exerciseMaterialSlots(temp);
     } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }
