@@ -27,11 +27,21 @@ Use the toolbar workspace picker or **Workspace → Switch workspace**. **Modeli
 
 Choose **Workspace → Save workspace as** to create a named copy. **Reset workspace** restores the active preset's default or the original arrangement of a saved copy. Studio remembers dock placement, sizes, floating positions, visibility and the Assets tab for each workspace. Earlier single-layout preferences appear as **Custom**.
 
-In **View → Customize Studio**, choose Slate, Light or High contrast, select an accent, and adjust interface scale from 85% to 140%. Configure Save, Play/Stop, Frame Selection and Create Image in the Shortcuts tab. Studio checks conflicts before applying any changes. Escape stays available for stopping Play or canceling an edit. Use **Restore Defaults** to reset appearance and shortcuts. Press **Ctrl+K** to find and run available menu commands. Workspaces and preferences belong to the local user profile.
+In **View → Customize Studio**, choose Slate, Light or High contrast, select an accent, and adjust interface scale from 85% to 140%. Configure Save, Play/Stop, Frame Selection and Create Image in the Shortcuts tab. Studio checks conflicts before applying any changes. Escape stays available for stopping Play or canceling an edit. Use **Restore Defaults** to reset appearance and shortcuts. Press **Ctrl+K** or click **Search Studio** to find commands, scene objects, meshes, and images. Use the arrow keys and Enter to open a result. Workspaces and preferences belong to the local user profile.
+
+## Organize the project in Studio
+
+In **Scene**, **Assets → Meshes**, or **Assets → Images**, open **Organize → New folder**. Drag a row onto a folder to move it, or use **Move to folder** for a keyboard-accessible picker that includes the top level. Select a folder and use **New folder** to create a nested folder. Right-click a row for context actions. Each panel has a search field. Meshes and Images also offer **Organize → Filter by use**.
+
+Studio stores folders in the local user profile for the project's stable ID. They persist across launches on this profile and organize the editor view. Project files carry the objects and assets. The Scene folders have no effect on transforms, rendering, or Play.
+
+Select an object in Scene or the viewport to open its Inspector. Expand **Transform**, **Mesh**, or **Material overrides** to edit the corresponding settings. Use **Mesh source** to choose a project mesh or **Make mesh editable** to create a UV-mapped source from a built-in primitive. For a native mesh, **Editable mesh** offers **Edit shared mesh** and **Make mesh unique**.
+
+Use **Copy appearance from** to copy a compatible slot's base color and texture settings onto the current object. The copied settings are per instance. A project-image assignment references the existing asset. Use **Make image unique** before editing the pixels independently. Controls appear where the selected object and material slot support them.
 
 ## Create a reusable mesh
 
-Open **Create → 3D Mesh** and choose **Cube**, **Sphere**, or **Cylinder**. Set its dimensions and tessellation while the viewport previews the result. Cylinders also support taper through the top diameter multiplier. Turn off **Place an instance in the scene** to save only the reusable asset. Select the asset in **Assets** and choose **Add instance** or **Assign to selection**.
+Open **Create → 3D Mesh** and choose **Cube**, **Sphere**, or **Cylinder**. Set its dimensions and tessellation while the viewport previews the result. Cylinders also support taper through the top diameter multiplier. Turn off **Place an instance in the scene** to save only the reusable asset. Select the asset in **Assets** and choose **Place in scene** or **Assign to selection**.
 
 Double-click a native asset or choose **Manage → Edit mesh parameters** to preview a change on every linked instance. Apply commits one Undo step and preserves instance transforms and material overrides. **Manage** also offers rename, duplicate, and **Make selected instance unique**. From an instance, **Locate editable source** selects the asset in the library.
 
@@ -41,7 +51,7 @@ Save the project to retain the editable recipe and references in schema v7. **Ex
 
 Select a native mesh or an imported mesh material slot with UV0. Open **Create → Image / Texture** to paint a project image. The canvas has a pencil, eraser, connected fill, eyedropper, RGBA color picker, zoom and grid. Change the width and height to crop or extend the canvas at its top-left origin. The hex field uses `#RRGGBBAA`. Canvas Undo/Redo works on strokes, fills and dimension changes. Enable **Assign to selected material slot** to see the draft on your mesh. **Create image** or **Apply to image** commits the draft as one project edit. Cancel restores the previous scene.
 
-The **Images** tab in Assets lists editable sources and usage counts. Double-click a source to edit it across its linked material slots. Use **Default texture** in the Inspector to detach a project image and restore the slot’s prior embedded-texture or flat-color setting. Use **Locate image source** to select the source in Assets. Manage offers assignment, rename, duplication, **Make selected slot unique**, and removal of unused images.
+The **Images** tab in Assets lists editable sources and usage counts. **New image** opens the project image editor directly. Double-click a source to edit it across its linked material slots. Use **Default texture** in the Inspector to detach a project image and restore the slot’s prior embedded-texture or flat-color setting. Use **Locate image source** to select the source in Assets. Manage offers assignment, rename, duplication, **Make selected slot unique**, and removal of unused images.
 
 Save the project to store exact RGBA pixels, source IDs, and material assignments in schema v8. Use **Export PNG** to write those pixels losslessly and **Import** on the Images tab to bring a PNG back as an independent editable source. Alpha is available in the canvas and PNG. Studio’s Vulkan material samples RGB and remains opaque. Project image assignments stay in the .platz project when exporting geometry to GLB.
 
@@ -49,7 +59,7 @@ PNG and GLB exports ask before replacing an existing file and publish the new fi
 
 ## Import and use existing assets
 
-The **Assets** dock lists embedded GLB meshes and their instance counts. Use **Import…** to keep a source in the library, **Add instance** to place it, or **Assign to selection** to change the geometry of the selected object while preserving its identity, placement, and color. In the validation project you can select **Low spire** in Assets and assign it to **Oblique spire** in the Scene panel. The **Manage** menu can replace every instance from a different GLB, save the original GLB, or remove a mesh with zero uses. These project changes support Undo and Redo.
+The **Assets** dock lists embedded GLB meshes and their instance counts. Use **Import…** to keep a source in the library, **Place in scene** to place it, or **Assign to selection** to change the geometry of the selected object while preserving its identity, placement, and color. In the validation project you can select **Low spire** in Assets and assign it to **Oblique spire** in the Scene panel. The **Manage** menu can replace every instance from a different GLB, save the original GLB, or remove a mesh with zero uses. These project changes support Undo and Redo.
 
 Use **Add object → Import mesh from GLB…** to import and place in one step. The importer accepts one static mesh with up to 32 indexed triangle primitives and an embedded buffer, up to 2 MiB per file. Imported GLB bytes and derived native GLB sizes share the 8 MiB mesh-library budget. Saving embeds the exact imported source bytes and keeps the .platz project portable. Project images have a separate budget of 32 sources and 8 MiB of RGBA pixels.
 

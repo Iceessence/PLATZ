@@ -1,10 +1,22 @@
 # Current handoff and verification ledger
 
-**PENDING INDEPENDENT REVIEW.** Windows x64 Release development candidate. Tested software commit `12180fc03699d6ec1454606ce5f9326687e44b5c`. Build and launch instructions live in [START_HERE.md](START_HERE.md). The NEON V2 audit covers `94acce51` and tested software `43c3c410`. This handoff records the first repair package for that audit.
+**PENDING INDEPENDENT REVIEW.** Windows x64 Release development candidate. Tested software commit `ae0e908d996598950fdbc8b2759928836a421fc6`. Build and launch instructions live in [START_HERE.md](START_HERE.md). The NEON V2 audit covers `94acce51` and tested software `43c3c410`. This handoff records the Studio organization, Inspector object-editing, and frustum-culling package following repair package 1 (`12180fc`).
 
 ## Authority and history
 
 The permanent product specification is docs/authority/PLATZ_MASTER_ENGINE_FIRST_V4.md. Its developer directive and Vulkan steering live alongside it. ADR-001 records the Vulkan, Studio, and project architecture. Earlier verified milestones are preserved in Git. The authoring package mapping is in docs/STUDIO_AUTHORING_TRACE.md. Independent release acceptance remains pending.
+
+## Studio organization and object editing
+
+Scene, Meshes, and Images share a searchable folder tree with nested groups, drag-and-drop, context menus, and a keyboard-accessible Move to folder dialog. Mesh and image rows show usage counts, with a used/unused filter and image thumbnails. Folder membership uses stable object or asset IDs under the current project's user profile. Copies with the same project ID share that layout within the profile. Scene folders organize rows and are independent of runtime transforms. Folder operations do not create project revisions.
+
+The Inspector shows selection-specific controls under collapsible Transform, Mesh, and Material overrides groups. The mesh and image dropdowns display the source's folder path. Adding a primitive through Scene creates an editable native mesh. A legacy built-in can be converted in one undoable edit while preserving its object ID, name, transform, and base color. Editable native meshes can be edited as shared sources or made unique. A compatible scene object's appearance can be copied into per-instance settings, with a separate Make image unique action for independent pixel editing. Mesh, texture, and appearance changes use the existing project revision and Undo machinery.
+
+Search Studio opens from the toolbar or Ctrl+K and finds commands, scene objects, meshes and images. Build and import/export actions use native file dialogs in the production application. Play hides authoring transform controls. The viewport remains a hardware Vulkan renderer and culls objects whose conservative bounds lie outside the camera frustum. Resource residency still considers the full authored scene so panning can reveal objects without rebuilding resources.
+
+Full parent-child scene transforms and first-class reusable Material assets require a separately approved schema change under the audit directive. This build uses schema v1–v8 compatibility and the existing canonical project model.
+
+On November 22, 2026, `& .\tools\build.ps1 -Test` configured and built Release (`C:\PLATZ\out\Release\PLATZ.exe` SHA-256 **A267493862FDA7777D70ED9CFB7A9D3C5C1AB5E4CBC7CF77A0FABE3240562825**) and passed all 16 CTest cases in 52.01 seconds (`0` failed, `0` skipped, zero Vulkan synchronization or GPU-assisted validation errors). In the 512-object visible drag benchmark (`build/studio-gpu-before.log` vs `build/studio-gpu-after.log`), conservative view-space frustum culling (`objects culled 502`) reduced viewport paint p95 from 0.5440–0.6417 ms to 0.4137–0.4594 ms (2.85–2.98 ms oldest-input-to-submitted-paint p95 across 500 and 1,000 moves/s at `899×707` and `2019×1107`, click dispatch p95 0.0902 ms, click-to-Studio-selection p95 3.5697 ms). Evidence logs and captures live in `build/studio-organization-qualification.log`, `build/studio-organization-visual.log`, `build/studio-organization-visual-150.log`, `build/studio-gpu-before.log`, `build/studio-gpu-after.log`, and `build/studio-organization-evidence/` (`100/` and `150/`).
 
 ## NEON V2 repair package 1
 
@@ -24,7 +36,7 @@ Scene selection follows the selected Qt row, including Windows UI Automation. As
 
 **Verified workspaces and Studio preferences.** Modeling, Materials, Texture and Playtest arrange the existing tools for each task. Per-workspace Qt dock state retains docking, floating positions, visibility, sizes and the Assets tab. Save Workspace As makes a named copy, and Reset Workspace restores its original arrangement or the built-in preset. An earlier single-layout preference migrates to Custom. Invalid Qt layout data falls back to a usable preset. Floating docks are checked against available screen title-bar area after restore and screen removal. The project toolbar remains available in Playtest, and Escape stays assigned to Stop and Cancel.
 
-Customize Studio previews Slate, Light and High contrast themes, four accent choices and interface scale from 85% to 140%. Save, Play/Stop, Frame Selection and Create Image shortcuts validate against each other, reserved controls and text editing. The Ctrl+K finder searches available menu commands and executes their existing actions. Workspace and preference records are stored in local QSettings independently of project data. Portable project bytes and schemas are unaffected.
+Customize Studio previews Slate, Light and High contrast themes, four accent choices and interface scale from 85% to 140%. Save, Play/Stop, Frame Selection and Create Image shortcuts validate against each other, reserved controls and text editing. The Ctrl+K finder searches available commands, objects, meshes and images. Workspace and preference records are stored in local QSettings independently of project data. Portable project bytes and schemas are unaffected.
 
 **Verified capital P resources.** One deterministic drawing generates 16, 24, 32, 48, 64, 128 and 256 px artwork for the Qt icon and the Windows executable. Hub and title-bar visuals were inspected on Windows. The Windows loader opened every embedded icon size. The executable sets its window icon through Qt. Direct visual inspection of the shell taskbar and Explorer is pending.
 
@@ -44,7 +56,7 @@ Under Material in the Inspector, Use imported texture switches the selected slot
 
 Schema v6 records disabled slots per retained revision. The exact encoded images stay in the immutable, digest-checked GLB in SQLite. WIC reads only embedded bytes. PNG chunk checksums and dimensions are checked before the codec call. Unsupported or corrupt images use flat base color, with source diagnostics in the Inspector or decode fallback counts in GPU diagnostics. Texture limits are 1024 pixels per side, 64 active source/sampler bindings, and 64 MiB decoded RGBA per scene. The existing 2 MiB per GLB and 8 MiB library source limits still apply. GPU upload creates a texture batch when active bindings change and retires the old batch after waiting for the transfer fence.
 
-## Verified on the development workstation
+## Earlier NEON V2 viewport repair evidence
 
 Windows 11 Pro build 26300, i9-14900K, RTX 5080 driver 617.42, Vulkan device 1.4.351, system loader 1.4.341, C++20 with MSVC 19.51.36260, Qt 6.12.0, SDL 3.4.20, SDK 1.4.363.1, VMA 3.5.0, and Slang 2026.22.1. `C:\PLATZ\out\Release\PLATZ.exe` SHA-256 **B565A33711E8B9D6614281C1DC3CE6173043069EC07EF94A2EA45987C036B0BB**.
 
@@ -67,17 +79,19 @@ Early Studio qualification found that Qt could defer the first viewport repaint 
 |---|---|
 | core-project | 29 scenarios. Native image bounds, budgets, v2/v6-to-v8 migration, exact pixels, shared/unique links, typed revisions, interrupted-write rollback and corrupt blob rejection. Previous geometry, project and GLB checks passed. |
 | shader_toolchain | Deterministic Slang output, validated SPIR-V, uniform and texture layout reflection, include rebuild, and last-known-good preservation. |
-| hardware_frame_readback | Project RGBA upload changed just the assigned slot, left object IDs intact, rendered opaque even at alpha zero and restored the underlying GLB texture on detach. Synchronization validation reported zero errors. |
+| hardware_frame_readback | Project RGBA upload changed just the assigned slot, left object IDs intact, rendered opaque even at alpha zero, restored the underlying GLB texture on detach, and verified conservative view-space frustum culling (`objects culled 1`), camera-pan reveal and boundary partial visibility. Synchronization validation reported zero errors. |
 | hardware_gpu_assisted | Same hardware checks with GPU-assisted validation. Zero errors. Existing Vulkan loader warnings about installed capture overlays remain. |
-| validation_scene_profile | Seven objects, two base-color textures, 1280×720 SDR, hidden FIFO surface, 16 warm-up and 96 measured frames, validation off. CPU submit/present p50/p95 was 0.1932/8.4141 ms. GPU p50/p95 was 0.0205/0.0215 ms. |
+| validation_scene_profile | Seven objects, two base-color textures, 1280×720 SDR, hidden FIFO surface, 16 warm-up and 96 measured frames, validation off. CPU submit/present p50/p95 was 0.1625/8.5383 ms. GPU p50/p95 was 0.0203/0.0206 ms. |
 | studio_edit_play_reopen | All 18 handle hit tests and transforms, signed snap math, local axes, bounds-centered scaling, Vulkan color overlay, Inspector previews and cancel, GLB overwrite, Undo, Play, and pixel-identical reopen. |
 | studio_transform_highdpi and studio_transform_200dpi | Handle math and visible integration at synthetic Qt 150% and 200% scales, including right-click and Escape cancellation. |
-| studio_visible_drag_profile | Visible native Windows input at 500 and 1,000 events per second, two client sizes, bounded Inspector paints and 100 asynchronous GPU clicks. The 512-object variant was also run separately. |
+| studio_visible_drag_profile | Visible native Windows input at 500 and 1,000 events per second, two client sizes (`2.80–2.93 ms` oldest-input-to-paint p95), bounded Inspector paints and 100 asynchronous GPU clicks (`0.0758 ms` dispatch p95, `3.62 ms` selection p95). The 512-object variant was also run separately. |
 | studio_native_geometry | Live creation and cancellation, linked edit, asset rename, copy, detach, Locate Source, one-step Undo/Redo, Play, reimportable GLB export, dense library-only sphere and v7 reopen. |
 | studio_native_images | Canvas input and stroke history, Vulkan preview, cancellation, an additional imported GLB slot, single-step project Undo/Redo, pixel-exact PNG export/reimport, geometry edits, Play, v8 reopen and editing after reopen. |
+| studio_organization | Three panel folder trees, nested creation, move dialog, rename, empty-folder removal, search, use filter, process restart persistence, collapsible Inspector groups, mesh source picker, built-in-to-native conversion, appearance copy, and empty-selection state; portable project bytes unchanged. |
 | studio_workspaces | Legacy layout migration, custom dock persistence, offscreen recovery, appearance preview/cancel, shortcut conflicts and remapping, searchable menu actions, reset, malformed-settings recovery, packaged P geometry and unchanged portable project bytes. |
 | studio_workspaces_highdpi | Same workflow with 150% Qt display scaling and a 125% Studio-scale setting. Physical mixed-monitor transitions remain unqualified. |
-| studio_process_restart | Windows icon-group size table and all seven icon loads, window small-icon handle, actual PLATZ.exe save, shutdown, restart and stable-ID recovery. Permanent validation project bytes remained intact during the tests. |
+| studio_organizer_drag | Profile persistence, project separation, independent namespaces, optimistic peer updates, cycle rejection, deleted-item empty-folder removal, corrupt-profile recovery backup, and QDrag pointer drag into a folder and back to root. |
+| studio_process_restart | Windows icon-group size table and all seven icon loads, window small-icon handle, UIA tree-item selection and Object ID disclosure expansion, actual PLATZ.exe save, shutdown, restart and stable-ID recovery. Permanent validation project bytes remained intact during the tests. |
 
 The permanent validation project is projects/PLATZ Validation.platz at revision 12. **Harbor signs** adds one object with two slots, **Signal flags** (PNG) and **Harbor mark** (JPEG). The prior six object IDs remain intact. SHA-256 is **D13C5C1ED4A7726DA4D758A30EB6DA6B96161CCB937156F45D7A8CBDCFA5F894**.
 
