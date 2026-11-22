@@ -8,6 +8,7 @@
 #endif
 #include <chrono>
 #include <cmath>
+#include <algorithm>
 #include <cstdlib>
 #include <iostream>
 #include <limits>
@@ -473,6 +474,130 @@ void textureSuite() {
     expect(v6.find(legacyId)->texturesOff==std::vector<std::uint32_t>{0,1},"Migration changed the legacy revision.");
     pass("texture override undo, Play isolation, persistence and schema v5 flat-appearance migration");
 }
+
+void nativeGeometrySuite(const fs::path& executable) {
+    for (auto shape:{NativeShape::Cube,NativeShape::Sphere,NativeShape::Cylinder}) {
+        auto source=defaultNativeMesh(shape);
+        source.size={1.25f,3.2f,.75f};
+        source.segments=shape==NativeShape::Cube ? 2 : 12;
+        if (shape==NativeShape::Cylinder) {source.rings=3; source.topScale=.6f;}
+        const auto mesh=buildNativeMesh(source);
+        const auto same=MeshAsset::decode(mesh->source());
+        expect(same->digest()==mesh->digest() && buildNativeMesh(source)->digest()==mesh->digest(),
+               "Generated GLB failed deterministic rebuild or reimport.");
+        expect(mesh->primitives().size()==1 && mesh->primitives().front().hasUv &&
+               mesh->materialSlots().size()==1,"Native geometry lost UV0 or its material slot.");
+        const auto& vertices=mesh->vertices();
+        for (const auto& vertex:vertices) {
+            expect(std::abs(std::hypot(vertex.normal[0],vertex.normal[1],vertex.normal[2])-1)<.001f &&
+                   std::all_of(vertex.uv.begin(),vertex.uv.end(),[](float uv){return uv>=0 && uv<=1;}),
+                   "Generated normal or UV was invalid.");
+        }
+        const auto& indices=mesh->indices();
+        const auto expected=shape==NativeShape::Cube ? 12*source.segments*source.segments :
+                            shape==NativeShape::Sphere ? 2*source.segments*(source.rings-1) :
+                            2*source.segments*(source.rings+1);
+        expect(indices.size()==3*expected,"Generated mesh had an incorrect face count.");
+        for (size_t i=0;i<indices.size();i+=3) {
+            const auto& a=vertices.at(indices[i]);
+            const auto& b=vertices.at(indices[i+1]);
+            const auto& c=vertices.at(indices[i+2]);
+            auto ab=b.position, ac=c.position;
+            for (int axis=0;axis<3;++axis) {
+                ab[axis]-=a.position[axis]; ac[axis]-=a.position[axis];
+            }
+            float facing=0;
+            for (int axis=0;axis<3;++axis) {
+                const int u=(axis+1)%3,v=(axis+2)%3;
+                facing+=(ab[u]*ac[v]-ab[v]*ac[u])*(a.normal[axis]+b.normal[axis]+c.normal[axis]);
+            }
+            expect(facing>0,"Generated a degenerate or inward-wound triangle.");
+        }
+        expect(std::abs(mesh->maxCorner()[1]-source.size[1]*.5f)<.001f,"Wrong height bounds.");
+        auto invalid=source;
+        invalid.size[0]=std::numeric_limits<float>::infinity();
+        rejects([&]{buildNativeMesh(invalid);});
+        invalid=source;
+        invalid.segments=129;
+        rejects([&]{buildNativeMesh(invalid);});
+    }
+    auto maximum=defaultNativeMesh(NativeShape::Sphere);
+    maximum.segments=128;
+    maximum.rings=64;
+    expect(buildNativeMesh(maximum)->indices().size()==128*63*6,"Maximum sphere did not fit the supported limits.");
+    pass("native cube, sphere and cylinder topology, UVs, normals, winding, bounds and GLB reimport");
+
+    Fixture fixture;
+    auto project=Project::create(fixture.source,"Native sources");
+    const auto imported=project.importMesh(PLATZ_TEST_TEXTURE,project.revision());
+    project.save();
+    const auto original=*project.find(imported);
+    const auto legacyHead=project.savedRevision();
+    auto source=defaultNativeMesh(NativeShape::Cylinder);
+    const auto unplaced=project.previewNativeMesh({},source,project.revision());
+    expect(unplaced.objects.size()==project.objects().size()+1 && !project.dirty(),
+           "Draft mesh leaked into saved project state.");
+    const auto shared=project.createNativeMesh("Shared cylinder",source,true,project.revision());
+    const auto linked=project.instantiateMesh(shared.key,project.revision());
+    auto tinted=*project.find(linked);
+    tinted.position={2.5f,1.f,3.f};
+    tinted.setSlotColor(0,std::array{.1f,.5f,.9f});
+    project.edit(tinted,project.revision());
+    const auto assigned=project.objects().front().id;
+    project.assignMesh(assigned,shared.key,project.revision());
+    const auto copy=project.copyNativeMesh(shared.key,"Unlinked cylinder",{},project.revision());
+    expect(copy!=shared.key && project.meshLibrary().at(copy).asset.data->digest()==tinted.asset.data->digest(),
+           "Identical native geometry did not retain separate stable identities.");
+    project.renameMeshAsset(shared.key,"Column source",project.revision());
+    const auto prior=project.revision();
+    Runtime runtime(project);
+    auto change=source;
+    change.size={1.75f,2.1f,1.5f};
+    change.segments=8;
+    change.topScale=.45f;
+    const auto preview=project.previewNativeMesh(shared.key,change,prior);
+    expect(!preview.selected.empty() && project.revision()==prior && *project.find(linked)==tinted,
+           "Parameter preview changed authoritative state.");
+    project.editNativeMesh(shared.key,change,prior);
+    rejects([&]{project.editNativeMesh(shared.key,source,prior);});
+    const auto revised=*project.find(linked);
+    expect(revised.asset.key()==shared.key && revised.asset.data->digest()==preview.geometry->digest() &&
+           revised.position==tinted.position && revised.slotColors==tinted.slotColors &&
+           project.find(assigned)->asset==revised.asset && project.find(shared.objectId)->asset==revised.asset &&
+           project.meshLibrary().at(copy).native==source,
+           "Shared edit disturbed identities, overrides, dependencies or an independent copy.");
+    expect(std::find(runtime.objects().begin(),runtime.objects().end(),tinted)!=runtime.objects().end(),
+           "Already-running scene observed a native source edit.");
+    project.undo();
+    expect(*project.find(linked)==tinted,"Undo did not restore the source and its linked instances together.");
+    project.redo();
+    expect(*project.find(linked)==revised,"Redo did not restore the revised mesh.");
+    rejects([&]{project.removeMeshAsset(shared.key,project.revision());});
+    const auto unique=project.copyNativeMesh(shared.key,"Unique instance",linked,project.revision());
+    expect(project.find(linked)->asset.key()==unique && project.find(linked)->slotColors==tinted.slotColors &&
+           project.find(shared.objectId)->asset.key()==shared.key,"Detach failed to move just the selected reference.");
+    rejects([&]{project.copyNativeMesh(shared.key,"Wrong source",linked,project.revision());});
+    project.removeMeshAsset(copy,project.revision());
+    project.save();
+    const auto reopened=Project::open(fixture.source);
+    expect(reopened.meshLibrary()==project.meshLibrary() && reopened.objects()==project.objects() &&
+           reopened.meshLibrary().at(shared.key).native==change && *reopened.find(imported)==original,
+           "Native source, linkage or legacy GLB changed across the v6-to-v7 save.");
+    auto restored=reopened;
+    restored.restorePrevious();
+    expect(restored.meshLibrary().size()==1 && restored.savedRevision()>legacyHead &&
+           *restored.find(imported)==original,"Restoring the v6 snapshot damaged legacy content.");
+    pass("native stable identities, linked edits, detach, Undo/Redo, Play and schema v6-to-v7 reopen");
+
+    const auto interrupted=std::string("\"")+executable.string()+"\" --interrupt-native \""+fixture.source.string()+"\"";
+    expect(std::system(interrupted.c_str())!=0,"Interrupted native write was not simulated.");
+    expect(Project::open(fixture.source).objects()==project.objects() &&
+           Project::open(fixture.source).meshLibrary()==project.meshLibrary(),
+           "An uncommitted native source write escaped SQLite rollback.");
+    alter(fixture.source,"UPDATE native_meshes SET recipe=99");
+    rejects([&]{Project::open(fixture.source);});
+    pass("interrupted native source save rolls back and an unknown recipe is rejected");
+}
 }
 
 int main(int argc, char** argv) {
@@ -480,6 +605,8 @@ int main(int argc, char** argv) {
         if(argc==3 && std::string(argv[1])=="--interrupt-assets")
             alter(argv[2],"BEGIN IMMEDIATE; DELETE FROM texture_off; DELETE FROM slot_colors; DELETE FROM mesh_library; DELETE FROM assets; "
                           "UPDATE project SET head=777",true);
+        if (argc==3 && std::string(argv[1])=="--interrupt-native")
+            alter(argv[2],"BEGIN IMMEDIATE; DELETE FROM native_meshes; UPDATE project SET head=777",true);
         if(argc==3 && std::string(argv[1])=="--extend-validation-textures") {
             auto scene=Project::open(argv[2]);
             const auto id=scene.importMesh(PLATZ_TEST_TEXTURE,scene.revision());
@@ -521,6 +648,7 @@ int main(int argc, char** argv) {
         assetLibrarySuite();
         materialSuite();
         textureSuite();
+        nativeGeometrySuite(std::filesystem::absolute(argv[0]));
         std::cout<<passed<<" Core scenarios passed.\n";
         return 0;
     } catch (const std::exception& e) {

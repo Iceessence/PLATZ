@@ -20,6 +20,7 @@ public:
     void setTransformSettings(platz::studio::TransformSettings settings);
     void cancelDrag();
     bool dragging() const { return drag_.has_value(); }
+    bool presentScene();
     platz::studio::GizmoPaths manipulatorPaths() const;
     void frameSelection();
     void resetView();

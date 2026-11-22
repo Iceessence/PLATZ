@@ -12,6 +12,7 @@
 #include <QDoubleSpinBox>
 #include <QFile>
 #include <QFileDialog>
+#include <QInputDialog>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
@@ -678,6 +679,194 @@ void exerciseInspectorPreviews(QTemporaryDir& dir) {
     std::cout<<"Live numeric input, scrubbing and color previews passed with cancellation and persisted undoable commits\n";
 }
 
+void exerciseNativeGeometry(QTemporaryDir& dir) {
+    const auto path=dir.filePath("Native geometry validation copy.platz");
+    const std::filesystem::path file(path.toStdWString());
+    check(QFile::copy(QString::fromUtf8(PLATZ_VALIDATION_PATH),path),"Cannot copy validation project for native geometry");
+    const auto original=platz::Project::open(file);
+    StudioWindow window;
+    expose(window);
+    fileAction(window,Qt::Key_O,path);
+    auto* view=static_cast<Viewport*>(control<QWidget>(window,"viewport"));
+    auto* tree=control<QListWidget>(window,"sceneTree");
+    auto* library=control<QTreeWidget>(window,"meshLibrary");
+    auto* play=control<QPushButton>(window,"playButton");
+    auto getKey=[&]{return library->currentItem()->data(0,Qt::UserRole).toString().toStdString();};
+    const auto count=tree->count();
+    const auto start=settledFrame(*view);
+    using Clock=std::chrono::steady_clock;
+    auto parameters=[&](const char* action,bool commit,const std::function<void(QWidget&)>& configure) {
+        std::optional<Capture> before, after;
+        std::exception_ptr failure;
+        Clock::time_point changed;
+        const auto deadline=Clock::now()+std::chrono::seconds(8);
+        QTimer observer;
+        QObject::connect(&observer,&QTimer::timeout,[&]{
+            auto* dialog=qobject_cast<QDialog*>(QApplication::activeModalWidget());
+            if (!dialog || dialog->objectName()!="nativeMeshDialog") return;
+            if (Clock::now()>deadline) {
+                failure=std::make_exception_ptr(std::runtime_error("Native mesh preview never became ready"));
+                dialog->reject();
+                observer.stop();
+                return;
+            }
+            try {
+                auto* accept=control<QPushButton>(*dialog,"acceptNativeMesh");
+                if (!accept->isEnabled()) return;
+                if (!before) {
+                    before=settledFrame(*view);
+                    changed=Clock::now();
+                    configure(*dialog);
+                    return;
+                }
+                after=settledFrame(*view);
+                std::cout<<"Native preview input through synchronous capture (includes debounce): "
+                         <<std::chrono::duration<double,std::milli>(Clock::now()-changed).count()<<" ms\n";
+                observer.stop();
+                if (commit) QTest::mouseClick(accept,Qt::LeftButton);
+                else QTest::keyClick(dialog,Qt::Key_Escape);
+            } catch (...) {
+                failure=std::current_exception();
+                observer.stop();
+                dialog->reject();
+            }
+        });
+        observer.start(15);
+        control<QAction>(window,action)->trigger();
+        observer.stop();
+        if (failure) std::rethrow_exception(failure);
+        check(before && after && before->tokens!=after->tokens,"Native parameters did not update Vulkan geometry live");
+        return *after;
+    };
+    parameters("createNativeCube",false,[](QWidget& dialog){
+        control<QDoubleSpinBox>(dialog,"meshWidth")->setValue(1.85);
+        control<QSpinBox>(dialog,"meshSegments")->setValue(3);
+    });
+    check(tree->count()==count && library->topLevelItemCount()==int(original.meshLibrary().size()) &&
+          settledFrame(*view).rgba==start.rgba,"Cancelling creation did not restore the exact authored scene");
+    const auto created=parameters("createNativeCylinder",true,[](QWidget& dialog){
+        control<QLineEdit>(dialog,"nativeMeshName")->setText("Editable taper");
+        control<QDoubleSpinBox>(dialog,"meshHeight")->setValue(1.7);
+        control<QDoubleSpinBox>(dialog,"meshTopScale")->setValue(.55);
+        control<QSpinBox>(dialog,"meshSegments")->setValue(12);
+    });
+    check(tree->count()==count+1 && library->currentItem()->data(1,Qt::DisplayRole).toInt()==1 &&
+          settledFrame(*view).tokens==created.tokens,"Create did not place the previewed reusable geometry");
+    const auto key=getKey();
+    const auto firstId=tree->currentItem()->data(Qt::UserRole).toString().toStdString();
+    check(key.starts_with("native:"),"Asset library did not expose a native stable identity");
+    QTest::mouseClick(control<QPushButton>(window,"placeMeshAsset"),Qt::LeftButton);
+    check(library->currentItem()->data(1,Qt::DisplayRole).toInt()==2,"Second instance did not link to the asset");
+    const auto secondId=tree->currentItem()->data(Qt::UserRole).toString().toStdString();
+    enterText(control<QDoubleSpinBox>(window,"positionX"),"2.60");
+    enterText(control<QLineEdit>(window,"materialColor"),"#38C9AB");
+    view->setFocus();
+    QTest::keyClick(view,Qt::Key_Home);
+    const auto beforeEdit=settledFrame(*view);
+    const auto edited=parameters("editNativeMesh",true,[](QWidget& dialog){
+        control<QDoubleSpinBox>(dialog,"meshWidth")->setValue(1.45);
+        control<QDoubleSpinBox>(dialog,"meshTopScale")->setValue(1.3);
+        control<QSpinBox>(dialog,"meshSegments")->setValue(7);
+    });
+    check(edited.tokens!=beforeEdit.tokens && getKey()==key && library->currentItem()->data(1,Qt::DisplayRole).toInt()==2 &&
+          control<QLineEdit>(window,"materialColor")->text()=="#38C9AB" &&
+          control<QDoubleSpinBox>(window,"positionX")->value()==2.6 &&
+          settledFrame(*view).tokens==edited.tokens,"Native edit failed to preserve instance identity, material or transform");
+    view->setFocus();
+    QTest::keyClick(view,Qt::Key_Z,Qt::ControlModifier);
+    check(settledFrame(*view).rgba==beforeEdit.rgba,"One Undo did not restore shared geometry in both instances");
+    QTest::keyClick(view,Qt::Key_Y,Qt::ControlModifier);
+    check(settledFrame(*view).rgba==edited.rgba,"Redo did not restore the edited native geometry");
+
+    QTest::mouseClick(play,Qt::LeftButton);
+    check(!control<QAction>(window,"createNativeCylinder")->isEnabled() &&
+          !control<QAction>(window,"editNativeMesh")->isEnabled(),"Native geometry controls remained active in Play");
+    const auto runtime=settledFrame(*view);
+    QTest::mouseClick(view,Qt::LeftButton,{},visiblePoint(runtime,count+2,*view));
+    check(settledFrame(*view).tokens!=runtime.tokens,"Play did not interact with the native mesh");
+    QTest::keyClick(view,Qt::Key_Escape);
+    check(settledFrame(*view).rgba==edited.rgba,"Play changed authored native geometry");
+    QTest::mouseClick(control<QPushButton>(window,"locateMeshSource"),Qt::LeftButton);
+    check(getKey()==key,"Locate Source did not select the correct editable asset");
+
+    auto nameAsset=[&](const char* action,const QString& name) {
+        QTimer observer;
+        bool answered=false;
+        QObject::connect(&observer,&QTimer::timeout,[&]{
+            auto* input=qobject_cast<QInputDialog*>(QApplication::activeModalWidget());
+            if (!input) return;
+            input->setTextValue(name);
+            answered=true;
+            observer.stop();
+            input->accept();
+        });
+        observer.start(15);
+        control<QAction>(window,action)->trigger();
+        observer.stop();
+        check(answered,"Native asset action did not open its naming dialog");
+    };
+    nameAsset("renameMeshAsset","Workshop taper");
+    check(getKey()==key && library->currentItem()->text(0)=="Workshop taper","Rename changed the native ID");
+    nameAsset("duplicateNativeMesh","Independent taper");
+    const auto independent=getKey();
+    check(independent!=key && library->currentItem()->data(1,Qt::DisplayRole).toInt()==0,
+          "Duplicated source had incorrect instance references");
+    QTest::mouseClick(control<QPushButton>(window,"locateMeshSource"),Qt::LeftButton);
+    nameAsset("detachNativeMesh","Unique taper");
+    check(getKey()!=key && getKey()!=independent && library->currentItem()->data(1,Qt::DisplayRole).toInt()==1 &&
+          settledFrame(*view).rgba==edited.rgba,"Making an instance unique disturbed its geometry or tint");
+    view->setFocus();
+    QTest::keyClick(view,Qt::Key_Z,Qt::ControlModifier);
+    QTest::mouseClick(control<QPushButton>(window,"locateMeshSource"),Qt::LeftButton);
+    check(getKey()==key && library->currentItem()->data(1,Qt::DisplayRole).toInt()==2,
+          "Undo did not restore the original shared asset relationship");
+
+    parameters("createNativeSphere",true,[](QWidget& dialog){
+        control<QCheckBox>(dialog,"placeNativeMesh")->setChecked(false);
+        control<QDoubleSpinBox>(dialog,"meshWidth")->setValue(1.4);
+        control<QSpinBox>(dialog,"meshSegments")->setValue(128);
+        control<QSpinBox>(dialog,"meshRings")->setValue(64);
+    });
+    const auto sphereKey=getKey();
+    check(sphereKey!=key && library->currentItem()->data(1,Qt::DisplayRole).toInt()==0 &&
+          tree->count()==count+2 && settledFrame(*view).rgba==edited.rgba,
+          "Library-only creation left a transient instance in the authored scene");
+    QTest::mouseClick(control<QPushButton>(window,"locateMeshSource"),Qt::LeftButton);
+
+    const auto glb=dir.filePath("Generated taper.glb");
+    chooseFile(glb,[&]{QTest::mouseClick(control<QPushButton>(window,"saveEmbeddedGlb"),Qt::LeftButton);});
+    const auto exported=platz::MeshAsset::load(std::filesystem::path(glb.toStdWString()));
+    check(exported->primitives().front().hasUv && exported->indices().size()==84,
+          "Generated GLB did not round-trip its expected UVs and triangles");
+    view->setFocus();
+    QTest::keyClick(view,Qt::Key_S,Qt::ControlModifier);
+    auto saved=platz::Project::open(file);
+    check(saved.find(firstId) && saved.find(secondId) && saved.find(firstId)->asset==saved.find(secondId)->asset &&
+          saved.find(secondId)->asset.key()==key && saved.find(secondId)->asset.data->digest()==exported->digest(),
+          "Saved instances did not retain shared source or current export geometry");
+    check(saved.meshLibrary().at(sphereKey).native->segments==128 &&
+          saved.meshLibrary().at(independent).asset.data->digest()==exported->digest() &&
+          saved.meshLibrary().at(key).name=="Workshop taper","Saving lost an unused source or its name");
+    for (const auto& object:original.objects())
+        check(saved.find(object.id) && *saved.find(object.id)==object,"Native editing changed a legacy object");
+    check(window.close(),"Native geometry scene did not close after saving");
+    StudioWindow reopened;
+    expose(reopened);
+    fileAction(reopened,Qt::Key_O,path);
+    auto* reopenedView=static_cast<Viewport*>(control<QWidget>(reopened,"viewport"));
+    const auto pixels=settledFrame(*reopenedView);
+    check(pixels.tokens==edited.tokens,"Reopened native geometry changed its rendered coverage");
+    auto* assets=control<QTreeWidget>(reopened,"meshLibrary");
+    for (int i=0;i<assets->topLevelItemCount();++i) {
+        auto* item=assets->topLevelItem(i);
+        if (item->data(0,Qt::UserRole).toString().toStdString()==key) assets->setCurrentItem(item);
+    }
+    check(control<QAction>(reopened,"editNativeMesh")->isEnabled() && assets->currentItem()->data(1,Qt::DisplayRole).toInt()==2,
+          "Reopened native source was not editable or lost instances");
+    check(reopened.close(),"Reopened native geometry scene did not close");
+    std::cout<<"Studio native create, cancel, linked edit, Undo/Redo, Play, GLB export and v7 reopen passed\n";
+}
+
 void exercise(const QString& path, bool create) {
     const std::filesystem::path file(path.toStdWString());
     std::string projectId, sceneId, editedId;
@@ -844,6 +1033,10 @@ int main(int argc, char** argv) {
         QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, temp.path());
         if (app.arguments().contains("--gizmo-only")) {
             exerciseViewportTransforms(temp,true);
+            return 0;
+        }
+        if (app.arguments().contains("--native-mesh-only")) {
+            exerciseNativeGeometry(temp);
             return 0;
         }
         exerciseTransformMath();

@@ -5,6 +5,8 @@
 #include <QFileDialog>
 #include <QHeaderView>
 #include <QHBoxLayout>
+#include <QInputDialog>
+#include <QLineEdit>
 #include <QMenu>
 #include <QPushButton>
 #include <QSignalBlocker>
@@ -28,7 +30,7 @@ void StudioWindow::buildAssets() {
     layout->setSpacing(6);
     assetList_=new QTreeWidget;
     assetList_->setObjectName("meshLibrary");
-    assetList_->setAccessibleName(tr("Embedded mesh assets"));
+    assetList_->setAccessibleName(tr("Project mesh assets"));
     assetList_->setHeaderLabels({tr("Mesh"),tr("Uses")});
     assetList_->setRootIsDecorated(false);
     assetList_->setItemsExpandable(false);
@@ -91,10 +93,19 @@ void StudioWindow::buildAssets() {
 
     auto* menu=new QMenu(manageAsset_);
     manageAsset_->setMenu(menu);
-    auto* saveSource=menu->addAction(tr("Save original GLB…"),this,[this]{
+    editMesh_=menu->addAction(tr("Edit mesh parameters…"),this,[this]{editNativeMesh(selectedAsset());});
+    editMesh_->setObjectName("editNativeMesh");
+    auto* rename=menu->addAction(tr("Rename asset…"),this,[this]{nameMesh(selectedAsset(),false);});
+    rename->setObjectName("renameMeshAsset");
+    copyMesh_=menu->addAction(tr("Duplicate native mesh…"),this,[this]{nameMesh(selectedAsset(),true);});
+    copyMesh_->setObjectName("duplicateNativeMesh");
+    detachMesh_=menu->addAction(tr("Make selected instance unique…"),this,[this]{nameMesh(selectedAsset(),true,selected_);});
+    detachMesh_->setObjectName("detachNativeMesh");
+    menu->addSeparator();
+    auto* saveSource=menu->addAction(tr("Export GLB…"),this,[this]{
         if (!project_ || runtime_) return;
         const auto asset=project_->meshLibrary().find(selectedAsset());
-        if (asset!=project_->meshLibrary().end()) writeGlbSource(asset->second.asset.data);
+        if (asset!=project_->meshLibrary().end()) writeGlbSource(asset->second.asset.data,asset->second.native.has_value());
     });
     saveSource->setObjectName("saveLibraryGlb");
     replaceInstances_=menu->addAction(tr("Replace all instances from GLB…"),this,[this]{
@@ -120,6 +131,9 @@ void StudioWindow::buildAssets() {
         });
     });
     removeAsset_->setObjectName("removeMeshAsset");
+    connect(assetList_,&QTreeWidget::itemDoubleClicked,this,[this]{
+        if (editMesh_->isEnabled()) editMesh_->trigger();
+    });
     assetsDock_->setWidget(panel);
     addDockWidget(Qt::LeftDockWidgetArea,assetsDock_);
     splitDockWidget(sceneDock_,assetsDock_,Qt::Vertical);
@@ -135,20 +149,22 @@ void StudioWindow::refreshAssets(const std::string& preferred) {
     const QSignalBlocker block(assetList_);
     assetList_->clear();
     if (project_) {
-        std::map<std::string,int> uses;
+        std::map<std::string_view,int> uses;
         for (const auto& object : project_->objects())
-            if (object.asset.data) ++uses[object.asset.data->digest()];
-        for (const auto& [digest,mesh] : project_->meshLibrary()) {
+            if (object.asset.data) ++uses[object.asset.key()];
+        for (const auto& [key,mesh] : project_->meshLibrary()) {
             auto* item=new QTreeWidgetItem(assetList_);
             item->setText(0,QString::fromStdString(mesh.name));
-            item->setData(0,Qt::UserRole,QString::fromStdString(digest));
-            item->setData(1,Qt::DisplayRole,uses[digest]);
+            item->setData(0,Qt::UserRole,QString::fromStdString(key));
+            item->setData(1,Qt::DisplayRole,uses[key]);
             item->setTextAlignment(1,Qt::AlignRight|Qt::AlignVCenter);
-            item->setToolTip(0,tr("%1 vertices · %2 triangles · %3 material slots\nSHA-256 %4")
+            item->setToolTip(0,tr("%1 vertices · %2 triangles · %3 material slots\n%4")
                 .arg(mesh.asset.data->vertices().size()).arg(mesh.asset.data->indices().size()/3)
                 .arg(mesh.asset.data->materialSlots().size())
-                .arg(QString::fromStdString(digest)));
-            if (digest==selected) assetList_->setCurrentItem(item);
+                .arg(mesh.native ? tr("Editable %1 · %2").arg(QString::fromUtf8(platz::nativeShapeName(mesh.native->shape)),
+                                                              QString::fromStdString(key)) :
+                                   tr("Imported GLB · SHA-256 %1").arg(QString::fromStdString(key))));
+            if (key==selected) assetList_->setCurrentItem(item);
         }
         assetList_->sortItems(0,Qt::AscendingOrder);
         if (!assetList_->currentItem() && assetList_->topLevelItemCount())
@@ -162,12 +178,39 @@ void StudioWindow::updateAssetActions() {
     const auto* item=assetList_->currentItem();
     const bool hasMesh=editable && item;
     const auto* object=hasMesh ? project_->find(selected_) : nullptr;
-    const auto digest=selectedAsset();
+    const auto key=selectedAsset();
+    const auto* library=hasMesh ? &project_->meshLibrary() : nullptr;
+    const bool native=library && library->contains(key) && library->at(key).native.has_value();
     importAsset_->setEnabled(editable);
     placeAsset_->setEnabled(hasMesh);
-    assignAsset_->setEnabled(object && (!object->asset.data || object->asset.data->digest()!=digest));
+    assignAsset_->setEnabled(object && object->asset.key()!=key);
     manageAsset_->setEnabled(hasMesh);
+    editMesh_->setEnabled(native);
+    copyMesh_->setEnabled(native);
+    detachMesh_->setEnabled(native && object && object->asset.key()==key);
     const int uses=item ? item->data(1,Qt::DisplayRole).toInt() : 0;
     replaceInstances_->setEnabled(hasMesh && uses>0);
     removeAsset_->setEnabled(hasMesh && uses==0);
+}
+
+void StudioWindow::nameMesh(const std::string& key,bool copy,std::string detachObject) {
+    if (!project_ || runtime_ || !project_->meshLibrary().contains(key)) return;
+    finishActiveField();
+    const auto revision=project_->revision();
+    const auto projectId=project_->id();
+    const auto name=QString::fromStdString(project_->meshLibrary().at(key).name);
+    const auto title=!detachObject.empty() ? tr("Make instance unique") :
+                          copy ? tr("Duplicate native mesh") : tr("Rename mesh asset");
+    bool accepted=false;
+    const auto result=QInputDialog::getText(this,title,tr("Asset name"),QLineEdit::Normal,
+                                          copy ? name+tr(" copy") : name,&accepted);
+    if (!accepted || !project_ || runtime_ || project_->id()!=projectId) return;
+    protectedCall([&]{
+        auto selection=key;
+        if (copy) selection=project_->copyNativeMesh(key,result.toStdString(),detachObject,revision);
+        else project_->renameMeshAsset(key,result.toStdString(),revision);
+        refresh(selection);
+        notify(detachObject.empty() ? (copy ? tr("Duplicated the native mesh.") : tr("Renamed the mesh asset.")) :
+                                      tr("The selected instance now has independent editable geometry."));
+    });
 }

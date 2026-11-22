@@ -79,6 +79,16 @@ void StudioWindow::buildMenus() {
     auto* deleteKey = new QShortcut(QKeySequence::Delete,tree_);
     deleteKey->setContext(Qt::WidgetShortcut);
     connect(deleteKey,&QShortcut::activated,erase_,&QAction::trigger);
+    createMenu_=menuBar()->addMenu(tr("&Create"));
+    auto* geometry=createMenu_->addMenu(tr("3D Mesh"));
+    const std::array shapes{platz::NativeShape::Cube,platz::NativeShape::Sphere,platz::NativeShape::Cylinder};
+    const std::array names{tr("Cube"),tr("Sphere"),tr("Cylinder")};
+    const std::array ids{"createNativeCube","createNativeSphere","createNativeCylinder"};
+    for (size_t i=0;i<shapes.size();++i) {
+        auto* action=geometry->addAction(names[i],this,[this,shape=shapes[i]]{editNativeMesh({},shape);});
+        action->setObjectName(ids[i]);
+        nativeCreationActions_[i]=action;
+    }
     auto* view = menuBar()->addMenu(tr("&View"));
     view->addAction(sceneDock_->toggleViewAction());
     view->addAction(inspectorDock_->toggleViewAction());
@@ -169,6 +179,8 @@ void StudioWindow::toHub() {
     inspectorDock_->toggleViewAction()->setEnabled(false);
     assetsDock_->toggleViewAction()->setEnabled(false);
     refreshAssets();
+    createMenu_->setEnabled(false);
+    for (auto* action:nativeCreationActions_) action->setEnabled(false);
     for (auto* action : {saveAction_,restore_,undo_,redo_,duplicate_,repeat_,erase_,playAction_,homeAction_}) action->setEnabled(false);
     backend_->hide();
     const auto path=QSettings().value("recentProject").toString();
@@ -260,6 +272,8 @@ void StudioWindow::refresh(const std::string& preferredAsset) {
                                    tr("RMB orbit   ·   MMB pan   ·   Wheel zoom   ·   F frame"));
     playAction_->setEnabled(true);
     transformControls_->setEnabled(!runtime_);
+    createMenu_->setEnabled(!runtime_);
+    for (auto* action:nativeCreationActions_) action->setEnabled(!runtime_);
     homeAction_->setEnabled(true);
     add_->setEnabled(!runtime_);
     undo_->setEnabled(!runtime_ && project_->canUndo());
@@ -281,7 +295,13 @@ void StudioWindow::syncInspector() {
     }
     const bool editable=object && !runtime_;
     const bool embedded=object && object->asset.data;
+    const bool native=embedded && !object->asset.nativeId.empty();
     saveGlb_->setVisible(embedded && !runtime_);
+    saveGlb_->setText(native ? tr("Export mesh GLB…") : tr("Save original GLB…"));
+    saveGlb_->setToolTip(native ? tr("Export the generated geometry. The editable source stays in the project.") :
+                                tr("Save the exact imported bytes from the project."));
+    locateMesh_->setVisible(embedded && !runtime_);
+    locateMesh_->setText(native ? tr("Locate editable source") : tr("Locate imported asset"));
     inspector_->setEnabled(editable);
     duplicate_->setEnabled(editable);
     repeat_->setEnabled(editable);
@@ -296,7 +316,8 @@ void StudioWindow::syncInspector() {
     }
     name_->setText(QString::fromStdString(object->name));
     mesh_->setText(tr("%1 mesh").arg(QString::fromUtf8(platz::meshName(object->mesh))));
-    if(object->asset.data) mesh_->setText(tr("GLB  ·  %1 vertices  ·  %2 triangles")
+    if (embedded) mesh_->setText(tr("%1  ·  %2 vertices  ·  %3 triangles")
+        .arg(native ? tr("Native mesh") : tr("GLB"))
         .arg(object->asset.data->vertices().size()).arg(object->asset.data->indices().size()/3));
     mesh_->setToolTip(object->asset.data ? QString::fromStdString("SHA-256 "+object->asset.data->digest()) : QString{});
     identity_->setText(QString::fromStdString(object->id));

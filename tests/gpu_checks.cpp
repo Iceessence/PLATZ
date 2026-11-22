@@ -255,6 +255,22 @@ void run() {
     if (mesh.asset->materialSlots()[0].texture)
         check(gpu.textureWarnings()==1,"A GPU upload decode fallback was not surfaced.");
     std::cout<<"PNG/JPEG orientation, UV0, sRGB sampling, per-slot isolation, texture re-upload and corrupt-raster fallback passed\n";
+
+    auto cylinder=platz::defaultNativeMesh(platz::NativeShape::Cylinder);
+    cylinder.size={1,1.6f,1};
+    cylinder.topScale=.45f;
+    mesh.asset=platz::buildNativeMesh(cylinder);
+    mesh.slotColors={{0,{.25f,.72f,.5f}}};
+    meshCamera.frameObject(mesh,float(width)/height);
+    gpu.draw(std::span(&mesh,1),meshCamera);
+    const auto taper=gpu.capture();
+    cylinder.topScale=1.5f;
+    mesh.asset=platz::buildNativeMesh(cylinder);
+    gpu.draw(std::span(&mesh,1),meshCamera);
+    const auto expanded=gpu.capture();
+    check(coverage(taper,mesh.token)>300 && coverage(expanded,mesh.token)>coverage(taper,mesh.token) &&
+          gpu.pick(width/2,height/2)==mesh.token,"Generated taper did not render or pick after atlas replacement.");
+    std::cout<<"Native cylinder geometry, generated GLB atlas replacement and object picking passed\n";
     check(gpu.validationErrors() == 0, "Vulkan reported graphics validation errors");
     std::cout << "Adapter: " << gpu.adapter() << "\n" << gpu.diagnostics() << "\n"
               << width << "x" << height << ", 3 objects, 11 draw + synchronous readbacks; median "

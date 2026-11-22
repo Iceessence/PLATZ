@@ -7,6 +7,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace platz {
@@ -68,8 +69,14 @@ class MeshAsset {
 };
 struct MeshReference {
     std::shared_ptr<const MeshAsset> data;
+    std::string nativeId;
+    std::string_view key() const {
+        return !nativeId.empty() ? std::string_view(nativeId) :
+               data ? std::string_view(data->digest()) : std::string_view{};
+    }
     bool operator==(const MeshReference& other) const {
-        return data == other.data || (data && other.data && data->digest() == other.data->digest());
+        return nativeId == other.nativeId &&
+               (data == other.data || (data && other.data && data->digest() == other.data->digest()));
     }
 };
 } // namespace platz

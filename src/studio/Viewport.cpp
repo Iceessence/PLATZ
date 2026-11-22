@@ -106,6 +106,10 @@ void Viewport::frameSelection() {
 }
 void Viewport::beginPlay() { cancelDrag(); playing_=true; authoringCamera_=camera_; }
 void Viewport::endPlay() { playing_=false; camera_=authoringCamera_; update(); }
+bool Viewport::presentScene() {
+    repaint();
+    return renderer_ && !failed_;
+}
 platz::engine::Capture Viewport::captureFrame() const {
     if (!renderer_ || failed_) throw std::runtime_error("The GPU viewport is unavailable.");
     return renderer_->capture();

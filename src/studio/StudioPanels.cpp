@@ -26,6 +26,7 @@
 #include <QStatusBar>
 #include <QTemporaryFile>
 #include <QToolBar>
+#include <QTreeWidget>
 #include <algorithm>
 #include <cmath>
 
@@ -292,6 +293,16 @@ void StudioWindow::buildInspector() {
     saveGlb_->hide();
     box->addWidget(saveGlb_,0,Qt::AlignLeft);
     connect(saveGlb_,&QPushButton::clicked,this,&StudioWindow::saveEmbeddedGlb);
+    locateMesh_=button({},"locateMeshSource");
+    locateMesh_->hide();
+    box->addWidget(locateMesh_,0,Qt::AlignLeft);
+    connect(locateMesh_,&QPushButton::clicked,this,[this]{
+        const auto* object=project_ ? project_->find(selected_) : nullptr;
+        if (!object || !object->asset.data || runtime_) return;
+        assetsDock_->show();
+        refreshAssets(std::string(object->asset.key()));
+        assetList_->setFocus();
+    });
     connect(name_,&QLineEdit::editingFinished,this,[this]{
         if (name_->isModified()) applyEdit([this](platz::Object& o){o.name=name_->text().toStdString();});
     });
@@ -458,11 +469,11 @@ void StudioWindow::saveEmbeddedGlb() {
     if (!project_ || runtime_) return;
     const auto* selected=project_->find(selected_);
     if (!selected || !selected->asset.data) return;
-    writeGlbSource(selected->asset.data);
+    writeGlbSource(selected->asset.data,!selected->asset.nativeId.empty());
 }
 
-void StudioWindow::writeGlbSource(std::shared_ptr<const platz::MeshAsset> source) {
-    QFileDialog dialog(this,tr("Save original GLB"),{},tr("Binary glTF (*.glb)"));
+void StudioWindow::writeGlbSource(std::shared_ptr<const platz::MeshAsset> source,bool native) {
+    QFileDialog dialog(this,native ? tr("Export mesh GLB") : tr("Save original GLB"),{},tr("Binary glTF (*.glb)"));
     dialog.setOptions(QFileDialog::DontConfirmOverwrite|QFileDialog::DontUseNativeDialog);
     dialog.setAcceptMode(QFileDialog::AcceptSave);
     dialog.setDefaultSuffix("glb");
@@ -476,7 +487,7 @@ void StudioWindow::writeGlbSource(std::shared_ptr<const platz::MeshAsset> source
         return;
     }
     file.setAutoRemove(false);
-    notify(tr("Saved the original GLB source."));
+    notify(native ? tr("Exported the generated mesh.") : tr("Saved the original GLB source."));
 }
 
 void StudioWindow::repeatObjects() {

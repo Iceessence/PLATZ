@@ -13,9 +13,19 @@ Type a transform value or a six-digit sRGB color in the Inspector to preview it.
 
 Add object creates primitives. Edit > Repeat objects previews copies with world-space spacing. Create copies accepts the entire operation, and Ctrl+Z undoes it. F5 starts Play. Click a block or column to turn it and use WASD to move. Escape restores the authored scene and camera. Ctrl+S saves. The Project menu can restore the previous saved revision as an undoable edit.
 
+## Create a reusable mesh
+
+Open **Create → 3D Mesh** and choose **Cube**, **Sphere**, or **Cylinder**. Set its dimensions and tessellation while the viewport previews the result. Cylinders also support taper through the top diameter multiplier. Turn off **Place an instance in the scene** to save only the reusable asset. Select the asset in **Assets** and choose **Add instance** or **Assign to selection**.
+
+Double-click a native asset or choose **Manage → Edit mesh parameters** to preview a change on every linked instance. Apply commits one Undo step and preserves instance transforms and material overrides. **Manage** also offers rename, duplicate, and **Make selected instance unique**. From an instance, **Locate editable source** selects the asset in the library.
+
+Save the project to retain the editable recipe and references in schema v7. **Export mesh GLB** writes derived positions, normals, UV0 and indices. The exported GLB imports as a static mesh. Editable parameters, instance transforms and instance tint stay in the .platz project. The existing **Save original GLB** command still extracts the exact bytes of imported assets.
+
+## Import and use existing assets
+
 The **Assets** dock lists embedded GLB meshes and their instance counts. Use **Import…** to keep a source in the library, **Add instance** to place it, or **Assign to selection** to change the geometry of the selected object while preserving its identity, placement, and color. In the validation project you can select **Low spire** in Assets and assign it to **Oblique spire** in the Scene panel. The **Manage** menu can replace every instance from a different GLB, save the original GLB, or remove a mesh with zero uses. These project changes support Undo and Redo.
 
-Use **Add object → Import mesh from GLB…** to import and place in one step. The importer accepts one static mesh with up to 32 indexed triangle primitives and an embedded buffer, up to 2 MiB per file and 8 MiB of unique sources across the project library. Saving embeds the exact source bytes and keeps the .platz project portable. The current build opens older projects and upgrades asset projects to schema v6 when saving changes.
+Use **Add object → Import mesh from GLB…** to import and place in one step. The importer accepts one static mesh with up to 32 indexed triangle primitives and an embedded buffer, up to 2 MiB per file. Imported GLB bytes and derived native GLB sizes share the 8 MiB mesh-library budget. Saving embeds the exact imported source bytes and keeps the .platz project portable. The current build opens older projects and saves imported-asset projects in schema v6 or v7.
 
 Select **Color study** in the validation project. Under **Material** in the Inspector, choose **Copper** or **Lagoon** and edit the sRGB hex value or use the swatch to pick a color. Parts that share a GLB material share a slot. A slot edit applies to the selected object. **Reset** restores the imported color, and Undo restores the previous edit. The importer reads RGB base-color factors. The preview renders opaque colors.
 

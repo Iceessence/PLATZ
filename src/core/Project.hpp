@@ -1,5 +1,5 @@
 #pragma once
-#include "../assets/MeshAsset.hpp"
+#include "../assets/NativeMesh.hpp"
 
 #include <cstdint>
 #include <filesystem>
@@ -37,9 +37,18 @@ struct ObjectEdit {
 struct LibraryMesh {
     std::string name;
     MeshReference asset;
+    std::optional<NativeMeshSource> native;
     bool operator==(const LibraryMesh&) const = default;
 };
-using MeshLibrary = std::map<std::string, LibraryMesh>;
+using MeshLibrary = std::map<std::string, LibraryMesh, std::less<>>;
+struct NativeMeshPreview {
+    std::vector<Object> objects;
+    std::string selected;
+    std::shared_ptr<const MeshAsset> geometry;
+};
+struct CreatedMesh {
+    std::string key, objectId;
+};
 
 class Project {
 public:
@@ -69,6 +78,14 @@ public:
     std::string replaceMeshInstances(const std::string& digest, const std::filesystem::path& source,
                                      std::uint64_t expectedRevision);
     void removeMeshAsset(const std::string& digest, std::uint64_t expectedRevision);
+    NativeMeshPreview previewNativeMesh(const std::string& key,const NativeMeshSource& source,
+                                        std::uint64_t expectedRevision) const;
+    CreatedMesh createNativeMesh(std::string name,const NativeMeshSource& source,bool place,
+                                 std::uint64_t expectedRevision);
+    void editNativeMesh(const std::string& key,const NativeMeshSource& source,std::uint64_t expectedRevision);
+    void renameMeshAsset(const std::string& key,std::string name,std::uint64_t expectedRevision);
+    std::string copyNativeMesh(const std::string& key,std::string name,const std::string& detachObject,
+                               std::uint64_t expectedRevision);
     std::string duplicate(const std::string& objectId, std::uint64_t expectedRevision);
     std::vector<Object> previewRepeat(const std::string& objectId, std::uint64_t expectedRevision,
                                       unsigned copies, Vec3 spacing) const;

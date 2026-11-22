@@ -30,6 +30,10 @@ constexpr int applicationId = 0x504C545A;
 constexpr const char* assetsSql = "CREATE TABLE assets(key TEXT PRIMARY KEY,source BLOB NOT NULL)";
 constexpr const char* meshLibrarySql =
     "CREATE TABLE mesh_library(rev INTEGER NOT NULL,key TEXT NOT NULL,name TEXT NOT NULL,PRIMARY KEY(rev,key))";
+constexpr const char* nativeMeshesSql =
+    "CREATE TABLE native_meshes(rev INTEGER NOT NULL,key TEXT NOT NULL,name TEXT NOT NULL,recipe INTEGER NOT NULL,"
+    "shape INTEGER NOT NULL,x REAL NOT NULL,y REAL NOT NULL,z REAL NOT NULL,segments INTEGER NOT NULL,"
+    "rings INTEGER NOT NULL,taper REAL NOT NULL,PRIMARY KEY(rev,key))";
 constexpr const char* projectSql =
     "CREATE TABLE project(singleton INTEGER PRIMARY KEY CHECK(singleton=1),"
     "id TEXT NOT NULL,scene TEXT NOT NULL,name TEXT NOT NULL,head INTEGER NOT NULL,token TEXT NOT NULL)";
@@ -106,7 +110,7 @@ void validate(const Object& obj) {
         if (!obj.asset.data) fail("Imported object is missing its source mesh.");
     } else {
         meshKey(obj.mesh);
-        if (obj.asset.data) fail("A primitive cannot have an imported mesh reference.");
+        if (obj.asset.data || !obj.asset.nativeId.empty()) fail("A built-in primitive cannot reference a library mesh.");
     }
     auto in = [](Vec3 v, float low, float high) {
         auto ok = [=](float f) { return std::isfinite(f) && f >= low && f <= high; };
@@ -221,7 +225,7 @@ struct Metadata { std::string id,scene,name,token; std::uint64_t head; int versi
 Metadata readMeta(Database& db) {
     if (scalar(db,"PRAGMA application_id") != applicationId) fail("This file is not a PLATZ project.");
     auto version = scalar(db,"PRAGMA user_version");
-    if (version<1 || version>6) fail("Unsupported PLATZ project version. Open it with a compatible build.");
+    if (version<1 || version>7) fail("Unsupported PLATZ project version. Open it with a compatible build.");
     Statement schema(db,"SELECT name,sql FROM sqlite_schema WHERE sql IS NOT NULL ORDER BY name");
     auto checkTable = [&](const char* name, const char* definition) {
         if (!schema.row() || schema.str(0) != name || schema.str(1) != definition)
@@ -229,6 +233,7 @@ Metadata readMeta(Database& db) {
     };
     if (version>=3) checkTable("assets",assetsSql);
     if (version>=4) checkTable("mesh_library",meshLibrarySql);
+    if (version>=7) checkTable("native_meshes",nativeMeshesSql);
     checkTable("objects", objectsSql);
     checkTable("project", projectSql);
     if (version>=5) checkTable("slot_colors",slotColorsSql);
@@ -260,6 +265,27 @@ LibraryMesh readMesh(Database& db, const std::string& key, std::string name, std
     if (key!="glb:"+mesh->digest()) fail("Embedded mesh digest mismatch.");
     return {std::move(name),{std::move(mesh)}};
 }
+void readNativeMeshes(Database& db,std::uint64_t rev,MeshLibrary& library,std::size_t& bytes) {
+    Statement native(db,"SELECT key,name,recipe,shape,x,y,z,segments,rings,taper FROM native_meshes WHERE rev=? LIMIT 513");
+    native.bind(1,static_cast<std::int64_t>(rev));
+    while (native.row()) {
+        if (library.size()>=maxMeshes) fail("Mesh library exceeds 512 assets.");
+        const auto key=native.str(0);
+        auto name=native.str(1);
+        validateName(name);
+        const auto shape=native.integer(3), segments=native.integer(7), rings=native.integer(8);
+        if (!key.starts_with("native:") || !validId(key.substr(7)) || native.integer(2)!=1 ||
+            shape<0 || shape>2 || segments<1 || segments>128 || rings<1 || rings>64)
+            fail("Invalid native mesh identity or unsupported recipe.");
+        const NativeMeshSource source{static_cast<NativeShape>(shape),
+            {native.number(4),native.number(5),native.number(6)},
+            static_cast<unsigned>(segments),static_cast<unsigned>(rings),native.number(9)};
+        auto geometry=buildNativeMesh(source);
+        bytes+=geometry->source().size();
+        if (bytes>maxMeshSourceBytes) fail("Mesh library exceeds its 8 MiB geometry budget.");
+        library.emplace(key,LibraryMesh{std::move(name),{std::move(geometry),key},source});
+    }
+}
 std::vector<Object> readObjects(Database& db, std::uint64_t rev, int version, MeshLibrary& library) {
     std::size_t assetBytes=0;
     if (version>=4) {
@@ -273,6 +299,7 @@ std::vector<Object> readObjects(Database& db, std::uint64_t rev, int version, Me
             library.emplace(digest,std::move(entry));
         }
     }
+    if (version>=7) readNativeMeshes(db,rev,library,assetBytes);
     Statement q(db,"SELECT id,name,mesh,px,py,pz,rx,ry,rz,sx,sy,sz,cr,cg,cb FROM objects WHERE rev=? ORDER BY seq LIMIT 513");
     q.bind(1,static_cast<std::int64_t>(rev));
     std::vector<Object> result;
@@ -281,15 +308,16 @@ std::vector<Object> readObjects(Database& db, std::uint64_t rev, int version, Me
         if (result.size() >= maxObjects) fail("This build supports up to 512 scene objects.");
         const auto key=q.str(2);
         const bool imported=version>=3 && key.starts_with("glb:");
-        Object o{q.str(0),q.str(1),imported ? Mesh::Imported : parseMesh(key),{q.number(3),q.number(4),q.number(5)},
+        const bool native=version>=7 && key.starts_with("native:");
+        Object o{q.str(0),q.str(1),imported || native ? Mesh::Imported : parseMesh(key),{q.number(3),q.number(4),q.number(5)},
                  {q.number(6),q.number(7),q.number(8)},{q.number(9),q.number(10),q.number(11)},
                  {q.number(12),q.number(13),q.number(14)}};
-        if (imported) {
-            const auto digest=key.substr(4);
-            auto asset=library.find(digest);
+        if (imported || native) {
+            const auto identity=native ? key : key.substr(4);
+            auto asset=library.find(identity);
             if (asset==library.end()) {
                 if (version>=4) fail("Scene references a mesh outside its library.");
-                asset=library.emplace(digest,readMesh(db,key,o.name,assetBytes)).first;
+                asset=library.emplace(identity,readMesh(db,key,o.name,assetBytes)).first;
             }
             o.asset=asset->second.asset;
             if (version<5 && o.asset.data->materialSlots().front().sourceColor)
@@ -351,6 +379,7 @@ void putLibrary(Database& db, const MeshLibrary& library, std::uint64_t rev) {
     Statement blob(db,"INSERT INTO assets(key,source) VALUES(?,?) ON CONFLICT(key) "
                       "DO UPDATE SET source=excluded.source WHERE assets.source<>excluded.source");
     for (const auto& [digest,mesh] : library) {
+        if (mesh.native) continue;
         const auto key="glb:"+digest;
         const auto& bytes=mesh.asset.data->source();
         blob.bind(1,key);
@@ -364,10 +393,40 @@ void putLibrary(Database& db, const MeshLibrary& library, std::uint64_t rev) {
         member.check(sqlite3_reset(member.stmt));
     }
 }
-const LibraryMesh& findMesh(const MeshLibrary& library, const std::string& digest) {
-    const auto item=library.find(digest);
+void putNativeMeshes(Database& db,const MeshLibrary& library,std::uint64_t rev) {
+    Statement statement(db,"INSERT INTO native_meshes VALUES(?,?,?,?,?,?,?,?,?,?,?)");
+    for (const auto& [key,mesh]:library) {
+        if (!mesh.native) continue;
+        const auto& source=*mesh.native;
+        statement.bind(1,static_cast<std::int64_t>(rev));
+        statement.bind(2,key);
+        statement.bind(3,mesh.name);
+        statement.bind(4,std::int64_t{1});
+        statement.bind(5,static_cast<std::int64_t>(source.shape));
+        for (int i=0;i<3;++i) statement.bind(6+i,source.size[i]);
+        statement.bind(9,static_cast<std::int64_t>(source.segments));
+        statement.bind(10,static_cast<std::int64_t>(source.rings));
+        statement.bind(11,source.topScale);
+        statement.done();
+        statement.check(sqlite3_reset(statement.stmt));
+    }
+}
+const LibraryMesh& findMesh(const MeshLibrary& library, std::string_view key) {
+    const auto item=library.find(key);
     if (item==library.end()) fail("That mesh is no longer in the asset library.");
     return item->second;
+}
+void validateMeshBudget(const MeshLibrary& library,std::string_view replaced={},std::size_t inserted=0) {
+    if (library.size()+(inserted && replaced.empty())>maxMeshes) fail("Mesh library exceeds 512 assets.");
+    auto bytes=inserted;
+    for (const auto& [key,mesh]:library)
+        if (key!=replaced) bytes+=mesh.asset.data->source().size();
+    if (bytes>maxMeshSourceBytes) fail("Mesh library exceeds its 8 MiB geometry budget.");
+}
+const LibraryMesh& findNativeMesh(const MeshLibrary& library,std::string_view key) {
+    const auto& entry=findMesh(library,key);
+    if (!entry.native) fail("That mesh is an imported GLB.");
+    return entry;
 }
 std::string registerMesh(MeshLibrary& library, const fs::path& source) {
     auto mesh=MeshAsset::load(source);
@@ -390,7 +449,8 @@ void putObjects(Database& db, const std::vector<Object>& objects, std::uint64_t 
         auto& o=objects[i];
         ins.bind(1,static_cast<std::int64_t>(rev)); ins.bind(2,static_cast<std::int64_t>(i));
         ins.bind(3,o.id); ins.bind(4,o.name);
-        ins.bind(5,o.asset.data ? "glb:"+o.asset.data->digest() : std::string(meshKey(o.mesh)));
+        ins.bind(5,!o.asset.nativeId.empty() ? o.asset.nativeId :
+                   o.asset.data ? "glb:"+o.asset.data->digest() : std::string(meshKey(o.mesh)));
         int k=6;
         for (Vec3 v : {o.position,o.rotation,o.scale,o.color}) {
             ins.bind(k++,v.x); ins.bind(k++,v.y); ins.bind(k++,v.z);
@@ -456,10 +516,20 @@ Object makeObject(Mesh mesh, std::string name, Vec3 p, Vec3 s, Vec3 c) {
 }
 std::string placeMesh(std::vector<Object>& objects, const LibraryMesh& entry) {
     if (objects.size()>=maxObjects) fail("This build supports up to 512 scene objects.");
-    auto object=makeObject(Mesh::Imported,entry.name,{},{1,1,1},{0.74f,0.78f,0.80f});
+    const Vec3 position=entry.native ? Vec3{0,entry.native->size[1]*.5f,2.9f} : Vec3{};
+    auto object=makeObject(Mesh::Imported,entry.name,position,{1,1,1},{0.74f,0.78f,0.80f});
     object.asset=entry.asset;
     objects.push_back(std::move(object));
     return objects.back().id;
+}
+std::string applyNativeGeometry(std::vector<Object>& objects,const MeshReference& mesh) {
+    std::string first;
+    for (auto& object:objects) {
+        if (object.asset.key()!=mesh.key()) continue;
+        if (first.empty()) first=object.id;
+        object.asset=mesh;
+    }
+    return first;
 }
 } // namespace
 
@@ -554,16 +624,13 @@ ObjectEdit Project::stage(const Object& replacement, std::uint64_t expectedRevis
     auto* old=find(replacement.id);
     if (!old) fail("The target object does not exist in this scene.");
     validate(replacement);
-    if (replacement.asset.data) findMesh(scene_.meshes,replacement.asset.data->digest());
+    if (replacement.asset.data) findMesh(scene_.meshes,replacement.asset.key());
     return {id_,sceneId_,revision_,*old,replacement};
 }
 void Project::replace(SceneState next) {
     if (next == scene_) return;
     requireRevisionCapacity();
-    if (next.meshes.size()>maxMeshes) fail("Mesh library exceeds 512 assets.");
-    size_t bytes=0;
-    for (const auto& item:next.meshes) bytes+=item.second.asset.data->source().size();
-    if (bytes>maxMeshSourceBytes) fail("The asset library supports up to 8 MiB of embedded meshes.");
+    validateMeshBudget(next.meshes);
     validateTextureBudget(next.objects);
     undo_.push_back(scene_);
     if (undo_.size() > maxUndo) undo_.erase(undo_.begin());
@@ -575,9 +642,9 @@ void Project::apply(const ObjectEdit& proposal) {
     auto* old=find(proposal.before.id);
     if (!old || *old != proposal.before || proposal.after.id != old->id)
         fail("Proposal has invalid identity or outdated source values.");
-    validate(proposal.after);
     auto changed=proposal.after;
-    if (changed.asset.data) changed.asset=findMesh(scene_.meshes,changed.asset.data->digest()).asset;
+    if (changed.asset.data) changed.asset=findMesh(scene_.meshes,changed.asset.key()).asset;
+    validate(changed);
     auto next=scene_;
     next.objects[static_cast<size_t>(old-scene_.objects.data())]=std::move(changed);
     replace(std::move(next));
@@ -657,6 +724,70 @@ void Project::removeMeshAsset(const std::string& digest, std::uint64_t expectedR
     auto next=scene_;
     next.meshes.erase(digest);
     replace(std::move(next));
+}
+NativeMeshPreview Project::previewNativeMesh(const std::string& key,const NativeMeshSource& source,
+                                              std::uint64_t expectedRevision) const {
+    requireRevision(expectedRevision);
+    if (!key.empty()) findNativeMesh(scene_.meshes,key);
+    auto mesh=buildNativeMesh(source);
+    validateMeshBudget(scene_.meshes,key,mesh->source().size());
+    NativeMeshPreview preview{scene_.objects,{},mesh};
+    const MeshReference reference{mesh,key};
+    if (!key.empty()) preview.selected=applyNativeGeometry(preview.objects,reference);
+    if (preview.selected.empty()) {
+        if (preview.objects.size()==maxObjects) preview.objects.clear();
+        preview.selected=placeMesh(preview.objects,{nativeShapeName(source.shape),reference,source});
+    }
+    return preview;
+}
+CreatedMesh Project::createNativeMesh(std::string name,const NativeMeshSource& source,bool place,
+                                      std::uint64_t expectedRevision) {
+    requireRevision(expectedRevision);
+    validateName(name);
+    auto mesh=buildNativeMesh(source);
+    auto next=scene_;
+    CreatedMesh result{"native:"+newId(),{}};
+    const auto& entry=next.meshes.emplace(result.key,LibraryMesh{std::move(name),{mesh,result.key},source}).first->second;
+    if (place) result.objectId=placeMesh(next.objects,entry);
+    replace(std::move(next));
+    return result;
+}
+void Project::editNativeMesh(const std::string& key,const NativeMeshSource& source,std::uint64_t expectedRevision) {
+    requireRevision(expectedRevision);
+    if (findNativeMesh(scene_.meshes,key).native==source) return;
+    auto geometry=buildNativeMesh(source);
+    auto next=scene_;
+    auto& entry=next.meshes.at(key);
+    entry.native=source;
+    entry.asset.data=std::move(geometry);
+    applyNativeGeometry(next.objects,entry.asset);
+    replace(std::move(next));
+}
+void Project::renameMeshAsset(const std::string& key,std::string name,std::uint64_t expectedRevision) {
+    requireRevision(expectedRevision);
+    findMesh(scene_.meshes,key);
+    validateName(name);
+    auto next=scene_;
+    next.meshes.at(key).name=std::move(name);
+    replace(std::move(next));
+}
+std::string Project::copyNativeMesh(const std::string& key,std::string name,const std::string& detachObject,
+                                    std::uint64_t expectedRevision) {
+    requireRevision(expectedRevision);
+    validateName(name);
+    auto entry=findNativeMesh(scene_.meshes,key);
+    auto next=scene_;
+    entry.name=std::move(name);
+    entry.asset.nativeId="native:"+newId();
+    auto identity=entry.asset.nativeId;
+    if (!detachObject.empty()) {
+        const auto* source=find(detachObject);
+        if (!source || source->asset.key()!=key) fail("The active object does not use this native mesh.");
+        next.objects[static_cast<size_t>(source-scene_.objects.data())].asset=entry.asset;
+    }
+    next.meshes.emplace(identity,std::move(entry));
+    replace(std::move(next));
+    return identity;
 }
 std::string Project::duplicate(const std::string& objectId, std::uint64_t expectedRevision) {
     return repeat(objectId, expectedRevision, 1, {});
@@ -743,6 +874,8 @@ void Project::save() {
         db.exec("PRAGMA user_version=2");
     }
     const bool hasLibrary=meta.version>=3 || !scene_.meshes.empty();
+    const bool hasNative=meta.version>=7 || std::any_of(scene_.meshes.begin(),scene_.meshes.end(),
+        [](const auto& entry){return entry.second.native.has_value();});
     if (hasLibrary) {
         if (meta.version<4) {
             if (meta.version<3) db.exec(assetsSql);
@@ -761,6 +894,16 @@ void Project::save() {
         putLibrary(db,scene_.meshes,revision_);
         putSlotColors(db,scene_.objects,revision_);
         putTextureOverrides(db,scene_.objects,revision_);
+    }
+    if (hasNative) {
+        if (meta.version<7) {
+            db.exec(nativeMeshesSql);
+            db.exec("PRAGMA user_version=7");
+        }
+        putNativeMeshes(db,scene_.meshes,revision_);
+        Statement pruneNative(db,"DELETE FROM native_meshes WHERE rev < ?");
+        pruneNative.bind(1,static_cast<std::int64_t>(head_));
+        pruneNative.done();
     }
     putObjects(db,scene_.objects,revision_);
     Statement update(db,"UPDATE project SET head=?,token=? WHERE singleton=1 AND token=?");
