@@ -10,6 +10,7 @@
 #include <cmath>
 #include <algorithm>
 #include <cstdlib>
+#include <fstream>
 #include <iostream>
 #include <limits>
 #include <stdexcept>
@@ -524,8 +525,26 @@ void nativeGeometrySuite(const fs::path& executable) {
     auto maximum=defaultNativeMesh(NativeShape::Sphere);
     maximum.segments=128;
     maximum.rings=64;
-    expect(buildNativeMesh(maximum)->indices().size()==128*63*6,"Maximum sphere did not fit the supported limits.");
+    const auto dense=buildNativeMesh(maximum);
+    expect(dense->indices().size()==128*63*6,"Maximum sphere did not fit the supported limits.");
     pass("native cube, sphere and cylinder topology, UVs, normals, winding, bounds and GLB reimport");
+
+    Fixture roundtrip;
+    roundtrip.copy.replace_extension(".glb");
+    {
+        std::ofstream exportFile(roundtrip.copy,std::ios::binary);
+        const auto& bytes=dense->source();
+        expect(bytes.size()>65536 &&
+               bool(exportFile.write(reinterpret_cast<const char*>(bytes.data()),bytes.size())),
+               "Could not stage high-detail native GLB export.");
+    }
+    auto importedProject=Project::create(roundtrip.source,"GLB round trip");
+    const auto importedDense=importedProject.importMesh(roundtrip.copy,importedProject.revision());
+    importedProject.save();
+    const auto reopenedDense=Project::open(roundtrip.source);
+    expect(reopenedDense.find(importedDense)->asset.data->source()==dense->source(),
+           "Large generated GLB was not embedded byte for byte.");
+    pass("high-detail native export reimports and saves as exact embedded GLB");
 
     Fixture fixture;
     auto project=Project::create(fixture.source,"Native sources");
@@ -589,14 +608,17 @@ void nativeGeometrySuite(const fs::path& executable) {
            *restored.find(imported)==original,"Restoring the v6 snapshot damaged legacy content.");
     pass("native stable identities, linked edits, detach, Undo/Redo, Play and schema v6-to-v7 reopen");
 
-    const auto interrupted=std::string("\"")+executable.string()+"\" --interrupt-native \""+fixture.source.string()+"\"";
-    expect(std::system(interrupted.c_str())!=0,"Interrupted native write was not simulated.");
+#ifdef _WIN32
+    expect(_wspawnl(_P_WAIT,executable.c_str(),executable.c_str(),L"--interrupt-native",fixture.source.c_str(),nullptr)==73,
+           "Could not execute the native source crash-injection process.");
     expect(Project::open(fixture.source).objects()==project.objects() &&
            Project::open(fixture.source).meshLibrary()==project.meshLibrary(),
            "An uncommitted native source write escaped SQLite rollback.");
+    pass("interrupted native source save rolls back");
+#endif
     alter(fixture.source,"UPDATE native_meshes SET recipe=99");
     rejects([&]{Project::open(fixture.source);});
-    pass("interrupted native source save rolls back and an unknown recipe is rejected");
+    pass("unknown native recipe rejected");
 }
 }
 

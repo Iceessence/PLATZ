@@ -159,7 +159,8 @@ struct Database {
             fail("Cannot open project database: " + why);
         }
         sqlite3_busy_timeout(db, 1500);
-        sqlite3_limit(db, SQLITE_LIMIT_LENGTH, 65536);
+        // A SQLite row includes the digest key and record overhead in addition to the GLB.
+        sqlite3_limit(db, SQLITE_LIMIT_LENGTH, static_cast<int>(MeshAsset::maxBytes)+4096);
         sqlite3_limit(db, SQLITE_LIMIT_ATTACHED, 0);
         // No application-defined SQL functions, extensions, or file-derived SQL are executed.
         if (sqlite3_exec(db,"PRAGMA trusted_schema=OFF; PRAGMA synchronous=FULL",nullptr,nullptr,nullptr) != SQLITE_OK) {
