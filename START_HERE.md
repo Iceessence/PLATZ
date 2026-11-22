@@ -3,11 +3,19 @@
 The permanent source root is C:\PLATZ. Start with CURRENT_HANDOFF.md for the tested revision and feature ledger. Product authority is docs/authority/PLATZ_MASTER_ENGINE_FIRST_V4.md. The V4 developer directive and Vulkan steering are alongside it. ADR-001 is the active renderer decision, retaining the Core and Studio decisions in ADR-000.
 
 ## Launch on the development workstation
-Double-click out\Release\PLATZ.exe for the project hub, or run the following in PowerShell.
+Double-click `C:\PLATZ\out\Release\PLATZ.exe` or run it in PowerShell to open the project hub.
 
-    & 'C:\PLATZ\out\Release\PLATZ.exe' 'C:\PLATZ\projects\PLATZ Validation.platz'
+    & 'C:\PLATZ\out\Release\PLATZ.exe'
 
-Use New project in the hub to create an ordinary editable .platz file. Select an object in the viewport or Scene panel. Use **Select**, **Move**, **Rotate**, or **Scale** above the viewport, or press **1–4** while the viewport has focus. Drag a colored axis or ring and release to apply a single undoable change. **World** and **Local** apply to Move and Rotate. Scale follows the object's axes. **Snap** uses the neighboring increment, measured in metres, degrees or scale units for the active tool. In the viewport, right-drag to orbit, middle-drag to pan, scroll to zoom, and press **F** to frame the selection.
+For an editable copy of the permanent validation scene, run the following.
+
+    $platzReview = Join-Path $env:TEMP "PLATZ Review $([guid]::NewGuid()).platz"
+    Copy-Item -LiteralPath 'C:\PLATZ\projects\PLATZ Validation.platz' -Destination $platzReview
+    & 'C:\PLATZ\out\Release\PLATZ.exe' $platzReview
+
+Use **New project** in the hub to create an editable `.platz` file. Select an object in the viewport or Scene panel. Use **Select**, **Move**, **Rotate**, or **Scale** above the viewport, or press **1–4** while the viewport has focus. Drag a colored axis or plane handle. The center moves in the screen plane or scales uniformly, depending on the tool. The outer rotation ring turns around the view axis. Release to apply one Undo step. Right-click or press **Escape** during a drag to restore the previous transform.
+
+**World** and **Local** apply to Move and Rotate. Scale follows the object's axes. Choose **Object pivot** or **Bounds center** to set the pivot. **Snap** uses the adjacent increment in metres, degrees or scale units. Hold **Ctrl** to temporarily toggle snap or **Shift** to move at one-tenth speed during the drag. The strip beneath the viewport shows the active transform delta. Outside a drag, right-drag to orbit, middle-drag to pan, scroll to zoom, and press **F** to frame the selection.
 
 Type a transform value or a six-digit sRGB color in the Inspector to preview it. Drag an axis label to scrub a number, or hold **Shift** for finer scrubbing. Enter or leaving the field applies valid text, and releasing applies a scrub. The color picker previews as you adjust it. Use **Escape** to cancel a text edit or drag, or **Cancel** in the color picker. Use **Ctrl+Z** and **Ctrl+Y** after committing changes.
 
@@ -36,6 +44,8 @@ Select a native mesh or an imported mesh material slot with UV0. Open **Create �
 The **Images** tab in Assets lists editable sources and usage counts. Double-click a source to edit it across its linked material slots. Use **Default texture** in the Inspector to detach a project image and restore the slot’s prior embedded-texture or flat-color setting. Use **Locate image source** to select the source in Assets. Manage offers assignment, rename, duplication, **Make selected slot unique**, and removal of unused images.
 
 Save the project to store exact RGBA pixels, source IDs, and material assignments in schema v8. Use **Export PNG** to write those pixels losslessly and **Import** on the Images tab to bring a PNG back as an independent editable source. Alpha is available in the canvas and PNG. Studio’s Vulkan material samples RGB and remains opaque. Project image assignments stay in the .platz project when exporting geometry to GLB.
+
+PNG and GLB exports ask before replacing an existing file and publish the new file after the write succeeds.
 
 ## Import and use existing assets
 

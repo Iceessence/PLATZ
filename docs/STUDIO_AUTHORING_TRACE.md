@@ -1,5 +1,7 @@
 # Studio authoring assignment and traceability
 
+This records the Studio authoring assignments that preceded the NEON V2 audit. The audit repair scope and its current verification live in [CURRENT_HANDOFF.md](../CURRENT_HANDOFF.md).
+
 Baseline d3cdfcf on Original PLATZ. Worktree clean at inspection. Windows 11 Pro build 26300, RTX 5080 driver 617.42, and the repository-pinned Vulkan/SDL/Qt/Slang build. The attachment supplies ordered task requirements. The PLATZ Master and existing ADRs retain product and architecture authority. Challenger is outside this work.
 
 | Package | Master linkage | Baseline, missing link, and regression risk |
