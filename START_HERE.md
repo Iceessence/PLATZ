@@ -13,6 +13,14 @@ Type a transform value or a six-digit sRGB color in the Inspector to preview it.
 
 Add object creates primitives. Edit > Repeat objects previews copies with world-space spacing. Create copies accepts the entire operation, and Ctrl+Z undoes it. F5 starts Play. Click a block or column to turn it and use WASD to move. Escape restores the authored scene and camera. Ctrl+S saves. The Project menu can restore the previous saved revision as an undoable edit.
 
+## Personalize Studio
+
+Use the toolbar workspace picker or **Workspace → Switch workspace**. **Modeling** shows Scene, Inspector and the mesh library. **Materials** opens a wider Inspector near the material controls. **Texture** brings the image library forward. **Playtest** gives the viewport more space and keeps Play/Stop in the toolbar. Drag dock titles to rearrange or float panels, resize dividers, and use the View menu to show panels again.
+
+Choose **Workspace → Save workspace as** to create a named copy. **Reset workspace** restores the active preset's default or the original arrangement of a saved copy. Studio remembers dock placement, sizes, floating positions, visibility and the Assets tab for each workspace. Earlier single-layout preferences appear as **Custom**.
+
+In **View → Customize Studio**, choose Slate, Light or High contrast, select an accent, and adjust interface scale from 85% to 140%. Configure Save, Play/Stop, Frame Selection and Create Image in the Shortcuts tab. Studio checks conflicts before applying any changes. Escape stays available for stopping Play or canceling an edit. Use **Restore Defaults** to reset appearance and shortcuts. Press **Ctrl+K** to find and run available menu commands. Workspaces and preferences belong to the local user profile.
+
 ## Create a reusable mesh
 
 Open **Create → 3D Mesh** and choose **Cube**, **Sphere**, or **Cylinder**. Set its dimensions and tessellation while the viewport previews the result. Cylinders also support taper through the top diameter multiplier. Turn off **Place an instance in the scene** to save only the reusable asset. Select the asset in **Assets** and choose **Add instance** or **Assign to selection**.
@@ -46,3 +54,5 @@ On Windows x64 with VS 2026 Desktop development with C++, Windows SDK 10.0.26100
     .\tools\build.ps1 -Test
 
 Initial setup requires network to retrieve the hash-checked Qt Base, SDL, Vulkan SDK components, Slang and VMA. Setup caches them in .deps. The development executable uses the adjacent Qt and SDL DLLs, platforms\qwindows.dll, the x64 MSVC runtime, Windows SQLite, and a Vulkan 1.4 driver with the engine-required device capabilities. Keep the deployment directory intact. This checkout-relative launch includes the validation project at projects\PLATZ Validation.platz. No external account or shader compiler is required to run the built editor.
+
+Regenerate the checked-in Windows and Qt icon assets with `py tools/generate_brand.py` after changing the capital P artwork.

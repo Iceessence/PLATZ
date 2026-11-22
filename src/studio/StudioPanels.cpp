@@ -116,7 +116,8 @@ void StudioWindow::buildHub() {
     body->setSpacing(12);
     auto* mark = new QHBoxLayout;
     auto* icon = new QLabel;
-    icon->setPixmap(platzIcon().pixmap(34,34));
+    icon->setObjectName("hubBrandMark");
+    icon->setPixmap(platzIcon().pixmap(32,32));
     mark->addWidget(icon);
     auto* brand = label("PLATZ");
     brand->setObjectName("brand");
@@ -125,7 +126,7 @@ void StudioWindow::buildHub() {
     body->addLayout(mark);
     body->addSpacing(17);
     auto* title = label(tr("Projects"));
-    title->setStyleSheet("font-size: 34px; font-weight: 650;");
+    title->setProperty("role","hubTitle");
     body->addWidget(title);
     auto* commands = new QHBoxLayout;
     auto* create = button(tr("New project…"),"newProject");
@@ -159,13 +160,27 @@ void StudioWindow::buildStudio() {
     tools_ = new QToolBar(tr("Project controls"));
     tools_->setObjectName("studioToolbar");
     tools_->setMovable(false);
+    tools_->setFloatable(false);
+    tools_->setAllowedAreas(Qt::TopToolBarArea);
     addToolBar(tools_);
     auto* brand = label("  PLATZ  ");
     brand->setObjectName("brand");
     tools_->addWidget(brand);
     tools_->addSeparator();
     projectTitle_ = label({});
+    projectTitle_->setMaximumWidth(230);
     tools_->addWidget(projectTitle_);
+    workspacePicker_=new QComboBox;
+    workspacePicker_->setObjectName("studioWorkspace");
+    workspacePicker_->setAccessibleName(tr("Active workspace"));
+    workspacePicker_->setToolTip(tr("Switch to a task workspace or one of your saved layouts."));
+    workspacePicker_->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+    workspacePicker_->setMinimumContentsLength(9);
+    workspacePicker_->setMaximumWidth(180);
+    tools_->addWidget(workspacePicker_);
+    connect(workspacePicker_,&QComboBox::currentIndexChanged,this,[this]{
+        switchWorkspace(workspacePicker_->currentData().toString());
+    });
     auto* spring = new QWidget;
     spring->setSizePolicy(QSizePolicy::Expanding,QSizePolicy::Preferred);
     tools_->addWidget(spring);
@@ -274,6 +289,7 @@ void StudioWindow::buildInspector() {
     inspectorDock_->setObjectName("inspectorDock");
     inspectorDock_->setMinimumWidth(250);
     auto* scroll = new QScrollArea;
+    scroll->setObjectName("inspectorScroll");
     scroll->setWidgetResizable(true);
     scroll->setFrameShape(QFrame::NoFrame);
     inspector_=new QWidget;
@@ -386,7 +402,9 @@ void StudioWindow::buildInspector() {
         }
         box->addLayout(row);
     }
-    section(box,tr("MATERIAL"));
+    auto* materialHeading=label(tr("MATERIAL"),"section");
+    materialHeading->setObjectName("materialHeading");
+    box->addWidget(materialHeading);
     auto* slotControls=new QHBoxLayout;
     materialSlot_=new QComboBox;
     materialSlot_->setObjectName("materialSlot");

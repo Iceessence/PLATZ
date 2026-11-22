@@ -1,5 +1,6 @@
 #pragma once
 #include "Project.hpp"
+#include "Appearance.hpp"
 #include "TransformGizmo.hpp"
 #include <QMainWindow>
 #include <array>
@@ -79,6 +80,38 @@ private:
     QAction *undo_{}, *redo_{}, *saveAction_{}, *restore_{}, *playAction_{}, *homeAction_{};
     QAction *duplicate_{}, *erase_{};
     QAction* repeat_{};
+    QAction *frameAction_{}, *searchCommandsAction_{};
+    StudioPreferences preferences_;
+    std::array<QAction*,4> configurableActions() const;
+    QString shortcutConflict(const StudioPreferences& preferences) const;
+    void loadStudioPreferences();
+    void applyStudioPreferences();
+    void saveStudioPreferences();
+    void customizeStudio();
+    void findCommands();
+    void syncControlHelp();
+    struct Workspace {
+        QString id, name;
+        QByteArray layout, original;
+        int tab{}, originalTab{};
+    };
+    QList<Workspace> workspaces_;
+    QString activeWorkspace_;
+    QComboBox* workspacePicker_{};
+    QMenu *workspaceMenu_{}, *workspaceSwitchMenu_{};
+    QAction *renameWorkspaceAction_{}, *removeWorkspaceAction_{};
+    void buildWorkspaceMenu();
+    void loadWorkspaces();
+    void persistWorkspaces(const QString& updated={},const QString& removed={});
+    void captureWorkspace();
+    Workspace* workspace(const QString& id);
+    void rebuildWorkspacePicker();
+    void applyWorkspace();
+    void switchWorkspace(const QString& id);
+    void applyWorkspacePreset(const QString& id);
+    void nameWorkspace(bool rename);
+    void removeWorkspace();
+    void recoverFloatingPanels();
     void repeatObjects();
     void saveEmbeddedGlb();
     void writeGlbSource(std::shared_ptr<const platz::MeshAsset> source,bool native=false);

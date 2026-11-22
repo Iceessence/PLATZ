@@ -1,22 +1,21 @@
 #include "Appearance.hpp"
 #include <QApplication>
+#include <QColor>
 #include <QPainter>
 #include <QPainterPath>
 #include <QPalette>
 #include <QStyleFactory>
+#include <algorithm>
 
 QIcon platzIcon() {
-    QPixmap canvas(64,64);
-    canvas.fill(Qt::transparent);
-    QPainter p(&canvas);
-    p.setRenderHint(QPainter::Antialiasing);
-    p.setPen(Qt::NoPen);
-    p.setBrush(QColor("#76e3bb"));
-    p.drawRoundedRect(1,1,62,62,14,14);
-    p.setBrush(QColor("#12392f"));
-    p.drawPolygon(QPolygonF{{17,14},{47,14},{43,23},{29,23},{21,49},{12,49}});
-    p.drawPolygon(QPolygonF{{31,28},{47,28},{44,36},{29,36}});
-    return QIcon(canvas);
+    static const auto icon=[]{
+        Q_INIT_RESOURCE(platz_brand);
+        QIcon result;
+        for (int size:{16,24,32,48,64,128,256})
+            result.addFile(QString(":/brand/platz-%1.png").arg(size),QSize(size,size));
+        return result;
+    }();
+    return icon;
 }
 QIcon meshIcon(platz::Mesh mesh, platz::Vec3 color) {
     QPixmap pix(48,48);
@@ -41,54 +40,100 @@ QIcon meshIcon(platz::Mesh mesh, platz::Vec3 color) {
     }
     return QIcon(pix);
 }
+namespace {
+struct Colors {
+    const char *background, *bar, *panel, *surface, *input, *edge, *text, *secondary, *disabled;
+};
+constexpr std::array themes{
+    Colors{"#141a1f","#171d22","#20292f","#2a353b","#11181c","#425056","#e2e9e8","#a9bbbe","#87969b"},
+    Colors{"#eef3f3","#e5eded","#f8fbfb","#f5f8f8","#ffffff","#85999c","#1a2c31","#43595d","#5e7479"},
+    Colors{"#0a1116","#10181d","#17212a","#22313a","#070b10","#647988","#f4fbfc","#c7d8dd","#a2b1ba"}
+};
+QColor blend(QColor background,QColor foreground,double amount) {
+    return QColor::fromRgbF((1-amount)*background.redF()+amount*foreground.redF(),
+                           (1-amount)*background.greenF()+amount*foreground.greenF(),
+                           (1-amount)*background.blueF()+amount*foreground.blueF());
+}
+}
+
+void applyStudioAppearance(QApplication& app,const StudioAppearance& appearance) {
+    const auto& colors=themes.at(static_cast<size_t>(appearance.theme));
+    const bool light=appearance.theme==StudioTheme::Light;
+    const std::array accents{QColor("#86e8bd"),QColor("#8bcdf8"),QColor("#f3c57b"),QColor("#f0aaba")};
+    const auto accent=accents.at(static_cast<size_t>(appearance.accent));
+    const QColor text(colors.text), background(colors.background);
+    const auto selected=blend(QColor(colors.panel),accent,light ? .35 : .18);
+    const auto focus=light ? blend(accent,QColor("#102824"),.64) : accent;
+    const auto hover=blend(QColor(colors.surface),text,.09);
+    const QColor warning(light ? "#7d4900" : "#f6c276");
+    const auto scale=[&](int base){return QString::number(qRound(base*appearance.scale/100.0));};
+    auto font=QFont("Segoe UI");
+    font.setPointSizeF(10.0*appearance.scale/100.0);
+    app.setFont(font);
+    QPalette palette;
+    palette.setColor(QPalette::Window,background);
+    palette.setColor(QPalette::WindowText,text);
+    palette.setColor(QPalette::Base,QColor(colors.input));
+    palette.setColor(QPalette::AlternateBase,QColor(colors.panel));
+    palette.setColor(QPalette::Text,text);
+    palette.setColor(QPalette::Button,QColor(colors.surface));
+    palette.setColor(QPalette::ButtonText,text);
+    palette.setColor(QPalette::Highlight,selected);
+    palette.setColor(QPalette::HighlightedText,text);
+    palette.setColor(QPalette::ToolTipBase,QColor(colors.surface));
+    palette.setColor(QPalette::ToolTipText,text);
+    for (auto role:{QPalette::WindowText,QPalette::Text,QPalette::ButtonText})
+        palette.setColor(QPalette::Disabled,role,QColor(colors.disabled));
+    app.setPalette(palette);
+    QString style=R"(
+QMainWindow, QDialog, QWidget#projectHub { background: $background; }
+QLabel { background: transparent; }
+QMenuBar, QStatusBar { background: $bar; color: $secondary; }
+QMenuBar { padding: 2px $widepx; }
+QMenuBar::item { padding: $smallpx $widepx; }
+QMenuBar::item:selected, QMenu::item:selected { background: $selected; color: $text; }
+QToolBar { background: $panel; border: 0; border-bottom: 1px solid $edge; spacing: $smallpx; padding: $tightpx; }
+QDockWidget { font-weight: 600; }
+QDockWidget::title { background: $panel; padding: $widepx; border-bottom: 1px solid $edge; }
+QMainWindow::separator { background: $edge; width: 3px; height: 3px; }
+QPushButton, QToolButton { background: $surface; color: $text; border: 1px solid $edge; border-radius: 5px; padding: $tightpx $buttonpx; }
+QPushButton:hover, QToolButton:hover { background: $hover; }
+QToolButton:checked { background: $selected; color: $text; border-color: $focus; }
+QPushButton:focus, QToolButton:focus, QLineEdit:focus { border: 1px solid $focus; }
+QPushButton:disabled, QToolButton:disabled { color: $disabled; background: $panel; border-color: $edge; }
+QPushButton[accent="true"] { color: #112322; background: $accent; border-color: $focus; font-weight: 650; }
+QPushButton[accent="true"]:focus { border: 2px solid #18312d; padding: $pressedpx $insetpx; }
+QPushButton[accent="true"]:hover { background: $accentHover; }
+QLineEdit { background: $input; border: 1px solid $edge; padding: $smallpx; border-radius: 4px; }
+QDoubleSpinBox QLineEdit, QSpinBox QLineEdit { background: transparent; color: $text; border: 0; padding: 0; }
+QListWidget { background: $background; border: none; outline: 0; }
+QListWidget::item { padding: $rowpx $smallpx; border-radius: 4px; }
+QListWidget::item:selected { background: $selected; color: $text; }
+QListWidget::item:focus { border: 1px solid $focus; }
+QFrame#hubCard, QFrame#recentCard { border: 1px solid $edge; border-radius: 8px; background: $panel; }
+QLabel[role="minor"] { color: $secondary; }
+QLabel[role="section"] { font-size: $sectionpx; font-weight: 700; color: $secondary; }
+QLabel[role="hubTitle"] { font-size: $titlepx; font-weight: 650; }
+QLabel#brand { color: $focus; font-size: $brandpx; font-weight: 750; }
+QLabel#sceneHeading { font-weight: 650; }
+QLabel#warning, QLabel[role="warning"] { color: $warning; }
+QStatusBar { border-top: 1px solid $edge; }
+QToolTip { color: $text; background: $surface; border: 1px solid $edge; padding: $smallpx; }
+)";
+    const std::pair<const char*,QString> tokens[]{
+        {"$background",colors.background},{"$bar",colors.bar},{"$panel",colors.panel},{"$surface",colors.surface},
+        {"$input",colors.input},{"$edge",colors.edge},{"$text",colors.text},{"$secondary",colors.secondary},
+        {"$disabled",colors.disabled},{"$accentHover",blend(accent,Qt::white,.28).name()},{"$accent",accent.name()},
+        {"$focus",focus.name()},{"$selected",selected.name()},{"$hover",hover.name()},{"$warning",warning.name()},
+        {"$small",scale(5)},{"$tight",scale(6)},{"$wide",scale(9)},{"$button",scale(11)},{"$row",scale(7)},
+        {"$pressed",scale(6).toInt()>1 ? QString::number(scale(6).toInt()-1) : QString("1")},
+        {"$inset",QString::number(scale(11).toInt()-1)},{"$brand",scale(17)},{"$section",scale(11)},{"$title",scale(34)}
+    };
+    for (const auto& [token,value]:tokens) style.replace(token,value);
+    app.setStyleSheet(style);
+}
 void configureAppearance(QApplication& app) {
     app.setStyle(QStyleFactory::create("Fusion"));
-    app.setFont(QFont("Segoe UI",10));
-    QPalette palette;
-    palette.setColor(QPalette::Window,QColor("#181e23"));
-    palette.setColor(QPalette::WindowText,QColor("#e2e9e8"));
-    palette.setColor(QPalette::Base,QColor("#141a1f"));
-    palette.setColor(QPalette::AlternateBase,QColor("#20292e"));
-    palette.setColor(QPalette::Text,QColor("#e2e9e8"));
-    palette.setColor(QPalette::Button,QColor("#273238"));
-    palette.setColor(QPalette::ButtonText,QColor("#e2e9e8"));
-    palette.setColor(QPalette::Highlight,QColor("#31594e"));
-    palette.setColor(QPalette::HighlightedText,QColor("#ffffff"));
-    palette.setColor(QPalette::ToolTipBase,QColor("#273238"));
-    palette.setColor(QPalette::ToolTipText,QColor("#ffffff"));
-    app.setPalette(palette);
     app.setWindowIcon(platzIcon());
-    app.setStyleSheet(R"(
-QMainWindow, QDialog, QWidget#projectHub { background: #141a1f; }
-QLabel { background: transparent; }
-QMenuBar, QStatusBar { background: #171d22; color: #b6c2c6; }
-QMenuBar { padding: 2px 8px; }
-QMenuBar::item { padding: 4px 9px; }
-QMenuBar::item:selected, QMenu::item:selected { background: #2a4940; }
-QToolBar { background: #1c242a; border: 0; border-bottom: 1px solid #364147; spacing: 7px; padding: 6px; }
-QDockWidget { font-weight: 600; }
-QDockWidget::title { background: #20292f; padding: 9px 10px; border-bottom: 1px solid #354047; }
-QMainWindow::separator { background: #323d43; width: 2px; height: 2px; }
-QPushButton, QToolButton { background: #2a353b; color: #dfebe7; border: 1px solid #425056; border-radius: 5px; padding: 6px 11px; }
-QPushButton:hover, QToolButton:hover { background: #38464d; }
-QToolButton:checked { background: #254840; color: #d7fff0; border-color: #68bd9f; }
-QPushButton:focus, QToolButton:focus, QLineEdit:focus { border: 1px solid #7fe3bc; }
-QPushButton:disabled, QToolButton:disabled { color: #879094; background: #222b30; border-color: #303a40; }
-QPushButton[accent="true"] { color: #102c23; background: #86e8bd; border-color: #97f1cc; font-weight: 650; }
-QPushButton[accent="true"]:hover { background: #acf6d4; }
-QLineEdit { background: #11181c; border: 1px solid #3a484e; padding: 5px; border-radius: 4px; }
-QDoubleSpinBox QLineEdit { background: transparent; color: #e2e9e8; border: 0; padding: 0; }
-QListWidget { background: #181f24; border: none; outline: 0; }
-QListWidget::item { padding: 7px 5px; border-radius: 4px; }
-QListWidget::item:selected { background: #27483f; color: #ecfff7; }
-QListWidget::item:focus { border: 1px solid #72b79b; }
-QFrame#hubCard, QFrame#recentCard { border: 1px solid #38474c; border-radius: 8px; background: #1c252a; }
-QLabel[role="minor"] { color: #a2b3b7; }
-QLabel[role="section"] { font-size: 11px; font-weight: 700; color: #a6bbb6; }
-QLabel#brand { color: #b6f5d7; font-size: 17px; font-weight: 750; }
-QLabel#sceneHeading { font-weight: 650; }
-QLabel#warning { color: #f6c276; }
-QStatusBar { border-top: 1px solid #354047; }
-QToolTip { color: #eef7f3; background: #263238; border: 1px solid #486057; padding: 4px; }
-)");
+    applyStudioAppearance(app,{});
 }

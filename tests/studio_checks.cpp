@@ -7,6 +7,8 @@
 #include <QCheckBox>
 #include <QComboBox>
 #include <QColorDialog>
+#include <QCryptographicHash>
+#include <QDialogButtonBox>
 #include <QDockWidget>
 #include <QInputMethodEvent>
 #include <QMenu>
@@ -14,17 +16,20 @@
 #include <QFile>
 #include <QFileDialog>
 #include <QInputDialog>
+#include <QKeySequenceEdit>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
 #include <QMouseEvent>
 #include <QPushButton>
 #include <QSettings>
+#include <QScreen>
 #include <QTemporaryDir>
 #include <QTabWidget>
 #include <QTest>
 #include <QTimer>
 #include <QToolButton>
+#include <QToolBar>
 #include <QTreeWidget>
 #include <QSpinBox>
 #include <algorithm>
@@ -1079,6 +1084,197 @@ void exerciseNativeImages(QTemporaryDir& dir) {
     std::cout<<"Studio canvas stroke, fill, sample, erase, preview, PNG reimport, Play and v8 reopen passed\n";
 }
 
+void exerciseWorkspaces(QTemporaryDir& dir,bool highDpi) {
+    const auto path=dir.filePath("Workspace review.platz");
+    check(QFile::copy(QString::fromUtf8(PLATZ_VALIDATION_PATH),path),"Cannot copy validation for workspace checks");
+    auto sourceHash=[&]{
+        QFile file(path);
+        check(file.open(QIODevice::ReadOnly),"Could not hash the workspace test project");
+        return QCryptographicHash::hash(file.readAll(),QCryptographicHash::Sha256);
+    };
+    const auto original=sourceHash();
+    const auto externalLayoutKey="StudioWorkspaces/v1/layouts/custom-11111111-1111-4111-8111-111111111111";
+    const auto icon=platzIcon();
+    for (int size:{16,24,32,48,64,128,256}) {
+        check(icon.availableSizes().contains(QSize(size,size)),"Qt brand resource is missing a required size");
+        const auto image=icon.pixmap(QSize(size,size),1.0).toImage();
+        auto at=[&](int x,int y){return image.pixelColor(x*size/64,y*size/64);};
+        const auto stem=at(21,44), bowl=at(43,25), counter=at(31,25);
+        check(image.size()==QSize(size,size) && image.pixelColor(0,0).alpha()==0 &&
+              stem.green()<90 && bowl.green()<110 && counter.green()>180,
+              "Brand lost the P stem, bowl, counter or transparency at a rendered size");
+    }
+    QByteArray legacyLayout;
+    {
+        StudioWindow seed;
+        expose(seed);
+        check(seed.openProject(path),"Could not open workspace test project");
+        auto* inspector=control<QDockWidget>(seed,"inspectorDock");
+        seed.addDockWidget(Qt::LeftDockWidgetArea,inspector);
+        control<QDockWidget>(seed,"assetsDock")->hide();
+        legacyLayout=seed.saveState(1);
+        check(seed.close(),"Could not close workspace seed");
+    }
+    QSettings().remove("StudioWorkspaces/v1");
+    QSettings().setValue("studioLayout",legacyLayout);
+    auto withModal=[&](QAction* command,const char* name,const std::function<void(QDialog&)>& act) {
+        bool answered=false;
+        std::exception_ptr error;
+        QTimer timer;
+        QObject::connect(&timer,&QTimer::timeout,[&]{
+            auto* dialog=qobject_cast<QDialog*>(QApplication::activeModalWidget());
+            if (!dialog) return;
+            answered=true;
+            timer.stop();
+            try {
+                check(!name || dialog->objectName()==name,"Unexpected workspace dialog");
+                act(*dialog);
+                if (dialog->isVisible()) throw std::runtime_error("Workspace test dialog remained open");
+            } catch (...) {error=std::current_exception(); dialog->reject();}
+        });
+        timer.start(20);
+        command->trigger();
+        timer.stop();
+        if (error) std::rethrow_exception(error);
+        check(answered,"The workspace command did not expose its dialog");
+    };
+    {
+        StudioWindow window;
+        expose(window);
+        check(window.openProject(path),"Could not open migrated layout");
+        auto* inspector=control<QDockWidget>(window,"inspectorDock");
+        auto* assets=control<QDockWidget>(window,"assetsDock");
+        auto* scene=control<QDockWidget>(window,"sceneDock");
+        auto* picker=control<QComboBox>(window,"studioWorkspace");
+        auto* viewport=static_cast<Viewport*>(control<QWidget>(window,"viewport"));
+        auto* play=control<QPushButton>(window,"playButton");
+        if (highDpi) check(viewport->devicePixelRatioF()>1,"Workspace test requires high DPI scaling");
+        check(picker->currentText()=="Custom" && window.dockWidgetArea(inspector)==Qt::LeftDockWidgetArea && assets->isHidden(),
+              "Existing single-layout preferences did not migrate to Custom");
+        inspector->setFloating(true);
+        inspector->move(-5000,-5000);
+        withModal(control<QAction>(window,"saveWorkspaceAs"),nullptr,[](QDialog& dialog){
+            auto* input=qobject_cast<QInputDialog*>(&dialog);
+            check(input!=nullptr,"Save As did not ask for a workspace name");
+            input->setTextValue(QString::fromUtf8("Mesh Review"));
+            input->accept();
+        });
+        const auto custom=picker->currentData().toString();
+        check(picker->currentText()=="Mesh Review" && custom.startsWith("custom-"),"Named layout was not selected or saved");
+        picker->setCurrentIndex(picker->findData("texture"));
+        check(!assets->isHidden() && scene->isHidden() &&
+              control<QTabWidget>(window,"assetTabs")->currentIndex()==1,"Texture workspace did not expose the image library");
+        picker->setCurrentIndex(picker->findData("materials"));
+        check(!inspector->isHidden() && !inspector->isFloating() && !scene->isHidden(),"Materials workspace did not restore its panels");
+        picker->setCurrentIndex(picker->findData(custom));
+        QApplication::processEvents();
+        check(assets->isHidden() && inspector->isFloating(),"Switching away lost the custom layout");
+        const auto onScreen=std::ranges::any_of(QGuiApplication::screens(),[&](const auto* display){
+            return display->availableGeometry().intersects(inspector->frameGeometry());
+        });
+        check(onScreen,"Floating layout was stranded outside the available screens");
+        auto* customize=control<QAction>(window,"customizeStudio");
+        withModal(customize,"customizeStudioDialog",[](QDialog& dialog){
+            control<QComboBox>(dialog,"studioTheme")->setCurrentIndex(1);
+            check(qApp->palette().color(QPalette::Window)==QColor("#eef3f3"),"Light theme did not preview on the application");
+            dialog.reject();
+        });
+        check(qApp->palette().color(QPalette::Window)==QColor("#141a1f"),"Cancel retained the appearance draft");
+        withModal(customize,"customizeStudioDialog",[](QDialog& dialog){
+            auto* apply=control<QPushButton>(dialog,"applyStudioPreferences");
+            auto* playKey=control<QKeySequenceEdit>(dialog,"shortcutPlay");
+            auto* frameKey=control<QKeySequenceEdit>(dialog,"shortcutFrame");
+            auto* warning=control<QLabel>(dialog,"studioShortcutConflict");
+            playKey->setKeySequence(QKeySequence("Ctrl+S"));
+            check(!apply->isEnabled() && warning->text().contains("already assigned"),"Duplicate shortcut was accepted");
+            playKey->setKeySequence(QKeySequence("Ctrl+K"));
+            check(!apply->isEnabled() && warning->text().contains("Find commands"),"Command search binding could be stolen");
+            playKey->setKeySequence(QKeySequence(Qt::Key_F6));
+            frameKey->setKeySequence(QKeySequence(Qt::Key_W));
+            check(!apply->isEnabled(),"Frame binding could override camera movement");
+            frameKey->setKeySequence(QKeySequence(Qt::Key_G));
+            control<QComboBox>(dialog,"studioTheme")->setCurrentIndex(2);
+            control<QComboBox>(dialog,"studioAccent")->setCurrentIndex(2);
+            auto* size=control<QComboBox>(dialog,"studioUiScale");
+            size->setCurrentIndex(size->findData(125));
+            check(apply->isEnabled(),"Valid custom shortcuts were rejected");
+            QTest::mouseClick(apply,Qt::LeftButton);
+        });
+        check(qApp->font().pointSizeF()==12.5 && qApp->palette().color(QPalette::Window)==QColor("#0a1116") &&
+              qApp->styleSheet().contains("#f3c57b"),"Theme, accent and type scale did not apply");
+        withModal(control<QAction>(window,"findStudioCommands"),"studioCommandSearch",[](QDialog& dialog){
+            auto* search=control<QLineEdit>(dialog,"studioCommandFilter");
+            search->setText("playtest");
+            check(control<QListWidget>(dialog,"studioCommandResults")->count()==1,"Command filter did not find a real workspace action");
+            QTest::keyClick(search,Qt::Key_Return);
+        });
+        check(picker->currentData().toString()=="playtest" && scene->isHidden() && assets->isHidden() &&
+              inspector->isHidden() && play->isVisible(),"Playtest layout concealed runtime controls");
+        viewport->setFocus();
+        QTest::keyClick(viewport,Qt::Key_F5);
+        check(play->text().contains("Play"),"Old binding still activated Play");
+        QTest::keyClick(viewport,Qt::Key_F6);
+        check(play->text().contains("Stop"),"Remapped Play shortcut did not activate");
+        QTest::keyClick(viewport,Qt::Key_Escape);
+        check(play->text().contains("Play"),"Escape did not restore authoring with custom shortcuts");
+        picker->setCurrentIndex(picker->findData(custom));
+        check(window.close(),"Workspace review did not close");
+    }
+    {
+        StudioWindow reopened;
+        expose(reopened);
+        check(reopened.openProject(path),"Workspace project failed to reopen");
+        auto* picker=control<QComboBox>(reopened,"studioWorkspace");
+        auto* assets=control<QDockWidget>(reopened,"assetsDock");
+        auto* inspector=control<QDockWidget>(reopened,"inspectorDock");
+        check(picker->currentText()=="Mesh Review" && inspector->isFloating() && assets->isHidden(),
+              "Recreated window lost its named workspace or panel state");
+        check(qApp->font().pointSizeF()==12.5 && qApp->palette().color(QPalette::Window)==QColor("#0a1116") &&
+              control<QAction>(reopened,"frameSelection")->shortcut()==QKeySequence(Qt::Key_G) &&
+              control<QAction>(reopened,"playStudio")->shortcut()==QKeySequence(Qt::Key_F6),
+              "Preferences or remapped keys did not survive reopening");
+        picker->setCurrentIndex(picker->findData("modeling"));
+        auto* view=static_cast<Viewport*>(control<QWidget>(reopened,"viewport"));
+        const auto unframed=settledFrame(*view);
+        view->setFocus();
+        QTest::keyClick(view,Qt::Key_F);
+        check(settledFrame(*view).tokens==unframed.tokens,"Old viewport frame binding was still active");
+        QTest::keyClick(view,Qt::Key_G);
+        check(settledFrame(*view).tokens!=unframed.tokens,"Remapped viewport frame key did not execute");
+        assets->hide();
+        inspector->setFloating(true);
+        control<QAction>(reopened,"resetWorkspace")->trigger();
+        check(!assets->isHidden() && !inspector->isFloating() && reopened.dockWidgetArea(inspector)==Qt::RightDockWidgetArea,
+              "Reset Workspace failed to restore its default dock arrangement");
+        withModal(control<QAction>(reopened,"customizeStudio"),"customizeStudioDialog",[](QDialog& dialog){
+            auto* buttons=dialog.findChild<QDialogButtonBox*>();
+            QTest::mouseClick(buttons->button(QDialogButtonBox::RestoreDefaults),Qt::LeftButton);
+            QTest::mouseClick(control<QPushButton>(dialog,"applyStudioPreferences"),Qt::LeftButton);
+        });
+        check(qApp->font().pointSizeF()==10 && control<QAction>(reopened,"playStudio")->shortcut()==QKeySequence(Qt::Key_F5),
+              "Restore Defaults failed to reapply appearance and shortcuts");
+        QSettings().setValue(externalLayoutKey,QVariantMap{{"name","Second window"},{"layout",legacyLayout}});
+        check(reopened.close(),"Restored workspace did not close");
+    }
+    check(QSettings().contains(externalLayoutKey),"Saving an active layout erased another window's workspace");
+    QSettings().setValue("StudioWorkspaces/v1/layouts/texture",QVariantMap{{"layout",QByteArray("invalid data")}});
+    QSettings().setValue("StudioWorkspaces/v1/active","texture");
+    QSettings().setValue("StudioPreferences/v1/shortcuts",QStringList{"Ctrl+K","F5","W",""});
+    {
+        StudioWindow recovered;
+        expose(recovered);
+        check(recovered.openProject(path),"Malformed preferences prevented a normal project open");
+        check(control<QComboBox>(recovered,"studioWorkspace")->currentData().toString()=="texture" &&
+              !control<QDockWidget>(recovered,"assetsDock")->isHidden() &&
+              control<QTabWidget>(recovered,"assetTabs")->currentIndex()==1 &&
+              control<QAction>(recovered,"saveStudio")->shortcut()==QKeySequence(QKeySequence::Save),
+              "Invalid layout or conflicting shortcut could not recover to usable defaults");
+        check(recovered.close(),"Recovered workspace did not close");
+    }
+    check(sourceHash()==original,"Personal UI preferences modified portable project bytes");
+    std::cout<<"Workspace migration, presets, named docks, search, themes, key remapping, reset and P icon passed\n";
+}
+
 void exercise(const QString& path, bool create) {
     const std::filesystem::path file(path.toStdWString());
     std::string projectId, sceneId, editedId;
@@ -1253,6 +1449,10 @@ int main(int argc, char** argv) {
         }
         if (app.arguments().contains("--image-only")) {
             exerciseNativeImages(temp);
+            return 0;
+        }
+        if (app.arguments().contains("--workspaces")) {
+            exerciseWorkspaces(temp,app.arguments().contains("--highdpi"));
             return 0;
         }
         exerciseTransformMath();

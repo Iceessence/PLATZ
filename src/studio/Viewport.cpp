@@ -25,7 +25,6 @@ platz::engine::DrawObject drawObject(const platz::Object& object,std::uint32_t t
 Viewport::Viewport(QWidget* parent) : QWidget(parent) {
     setObjectName("viewport");
     setAccessibleName(tr("Perspective viewport"));
-    setAccessibleDescription(tr("1 Select, 2 Move, 3 Rotate, 4 Scale. F frames the selected object. Escape cancels a drag. Arrow keys orbit and W A S D move the camera."));
     setFocusPolicy(Qt::StrongFocus);
     setMouseTracking(true);
     setAttribute(Qt::WA_NativeWindow);
@@ -237,7 +236,6 @@ void Viewport::keyPressEvent(QKeyEvent* event) {
     case Qt::Key_S: camera_.move(0,0,-step); break;
     case Qt::Key_A: camera_.move(-step,0,0); break;
     case Qt::Key_D: camera_.move(step,0,0); break;
-    case Qt::Key_F: frameSelection(); break;
     case Qt::Key_Home: resetView(); break;
     case Qt::Key_Plus: case Qt::Key_Equal: camera_.zoom(1); break;
     case Qt::Key_Minus: camera_.zoom(-1); break;

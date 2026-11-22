@@ -17,11 +17,18 @@ add_subdirectory(src/core)
 add_subdirectory(src/engine)
 add_library(platz_studio STATIC src/studio/StudioWindow.cpp src/studio/StudioPanels.cpp src/studio/StudioAssets.cpp
     src/studio/StudioNativeMesh.cpp src/studio/StudioImages.cpp src/studio/StudioImageEditor.cpp
-    src/studio/RasterCanvas.cpp src/studio/Viewport.cpp src/studio/StudioTransform.cpp
-    src/studio/TransformGizmo.cpp src/studio/Appearance.cpp)
+    src/studio/RasterCanvas.cpp src/studio/Viewport.cpp src/studio/StudioTransform.cpp src/studio/StudioWorkspaces.cpp
+    src/studio/TransformGizmo.cpp src/studio/StudioPreferences.cpp src/studio/Appearance.cpp)
 target_include_directories(platz_studio PUBLIC src/studio)
 target_link_libraries(platz_studio PUBLIC Qt6::Widgets platz_core platz_engine)
-qt_add_executable(PLATZ WIN32 src/studio/main.cpp)
+set(platz_brand_dir "${CMAKE_CURRENT_SOURCE_DIR}/src/studio/brand")
+set(platz_brand_images "")
+foreach(size 16 24 32 48 64 128 256)
+    list(APPEND platz_brand_images "${platz_brand_dir}/platz-${size}.png")
+endforeach()
+qt_add_resources(platz_studio platz_brand PREFIX "/brand" BASE "${platz_brand_dir}" FILES ${platz_brand_images})
+qt_add_executable(PLATZ WIN32 src/studio/main.cpp src/studio/brand/PLATZ.rc)
+target_include_directories(PLATZ PRIVATE "${platz_brand_dir}")
 target_link_libraries(PLATZ PRIVATE platz_studio)
 # Deploy the libraries used by this application, including the Qt platform adapter.
 foreach(lib Core Gui Widgets)

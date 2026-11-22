@@ -2,6 +2,7 @@
 #include "Appearance.hpp"
 #include "Viewport.hpp"
 #include <QAction>
+#include <QApplication>
 #include <QCheckBox>
 #include <QCloseEvent>
 #include <QComboBox>
@@ -21,6 +22,7 @@
 #include <QShortcut>
 #include <QStackedWidget>
 #include <QStatusBar>
+#include <QTimer>
 #include <QToolBar>
 #include <algorithm>
 
@@ -29,13 +31,19 @@ StudioWindow::StudioWindow() {
     setCentralWidget(pages_);
     setWindowIcon(platzIcon());
     resize(1360,820);
+    setMinimumSize(760,460);
     setDockNestingEnabled(true);
     buildHub();
     buildStudio();
     buildMenus();
+    loadStudioPreferences();
     resizeDocks({sceneDock_, inspectorDock_},{220,292},Qt::Horizontal);
     resizeDocks({assetsDock_},{270},Qt::Vertical);
     initialLayout_ = saveState(1);
+    loadWorkspaces();
+    connect(qApp,&QGuiApplication::screenRemoved,this,[this]{
+        QTimer::singleShot(0,this,&StudioWindow::recoverFloatingPanels);
+    });
     toHub();
 }
 
@@ -95,8 +103,12 @@ void StudioWindow::buildMenus() {
     view->addAction(sceneDock_->toggleViewAction());
     view->addAction(inspectorDock_->toggleViewAction());
     view->addAction(assetsDock_->toggleViewAction());
-    view->addAction(tr("Reset panel layout"),this,&StudioWindow::resetPanels);
-    view->addAction(tr("Frame selection"),this,[this]{if(project_) viewport_->frameSelection();});
+    frameAction_=view->addAction(tr("Frame selection"),this,[this]{
+        if (project_ && !viewport_->dragging()) viewport_->frameSelection();
+    });
+    frameAction_->setObjectName("frameSelection");
+    frameAction_->setShortcutContext(Qt::WidgetShortcut);
+    viewport_->addAction(frameAction_);
     view->addAction(tr("Reset camera"),this,[this]{if(project_) viewport_->resetView();});
     view->addAction(tr("GPU diagnostics"),this,[this]{
         QMessageBox details(QMessageBox::Information,tr("GPU diagnostics"),viewport_->diagnostics(),QMessageBox::Ok,this);
@@ -105,8 +117,16 @@ void StudioWindow::buildMenus() {
         details.exec();
     });
     view->addAction(tr("Reinitialize viewport"),this,[this]{if(project_) viewport_->retryRenderer();});
+    view->addSeparator();
+    auto* customize=view->addAction(tr("Customize Studio…"),this,&StudioWindow::customizeStudio);
+    customize->setObjectName("customizeStudio");
+    searchCommandsAction_=view->addAction(tr("Find commands…"),QKeySequence(Qt::CTRL|Qt::Key_K),this,&StudioWindow::findCommands);
+    searchCommandsAction_->setObjectName("findStudioCommands");
+    buildWorkspaceMenu();
     auto* run = menuBar()->addMenu(tr("&Runtime"));
     playAction_=run->addAction(tr("Play"),QKeySequence(Qt::Key_F5),this,&StudioWindow::togglePlay);
+    playAction_->setObjectName("playStudio");
+    saveAction_->setObjectName("saveStudio");
     auto* stop = new QShortcut(QKeySequence(Qt::Key_Escape),this);
     connect(stop,&QShortcut::activated,this,[this]{if(runtime_) togglePlay(); else cancelPreview();});
     auto* help = menuBar()->addMenu(tr("&Help"));
@@ -114,20 +134,10 @@ void StudioWindow::buildMenus() {
         QMessageBox::information(this,tr("Studio controls"),
             tr("Select an object in the scene list or click its surface. In the viewport, use 1 Select, 2 Move, 3 Rotate or 4 Scale. Drag a handle and release to apply. Escape cancels.\n\n"
                "Inspector transform and base-color edits preview as you type. Press Enter or leave the field to apply valid input. Drag a numeric axis label to scrub and hold Shift for finer adjustments. Escape restores the previous value.\n\n"
-               "Right drag to orbit, middle drag to pan, or use the wheel to zoom. With the viewport focused, use arrow keys to orbit, WASD to move, F to frame the selection and Home to reset.\n\n"
-               "Use F5 for Play. Click an object or press Space to turn it. Escape returns to the authored scene. Ctrl+S saves the project."));
+               "Right drag to orbit, middle drag to pan, or use the wheel to zoom. In the viewport the arrow keys orbit, WASD moves and Home resets the camera.\n\n"
+               "Use the Play button to enter the runtime. Click an object or press Space to turn it. Escape returns to the authored scene.\n\n"
+               "View → Customize Studio lists the active shortcuts. Ctrl+K searches available commands."));
     });
-}
-
-void StudioWindow::resetPanels() {
-    if (!project_) return;
-    restoreState(initialLayout_,1);
-    sceneDock_->show();
-    inspectorDock_->show();
-    assetsDock_->show();
-    tools_->show();
-    resizeDocks({sceneDock_,inspectorDock_},{220,292},Qt::Horizontal);
-    resizeDocks({assetsDock_},{270},Qt::Vertical);
 }
 
 void StudioWindow::notify(const QString& message) {
@@ -173,7 +183,7 @@ bool StudioWindow::confirmLeave() {
 }
 void StudioWindow::toHub() {
     if (!confirmLeave()) return;
-    if (project_) QSettings().setValue("studioLayout",saveState(1));
+    captureWorkspace();
     runtime_.reset(); project_.reset(); selected_.clear();
     pages_->setCurrentWidget(hub_);
     sceneDock_->hide(); inspectorDock_->hide(); assetsDock_->hide(); tools_->hide();
@@ -182,8 +192,10 @@ void StudioWindow::toHub() {
     assetsDock_->toggleViewAction()->setEnabled(false);
     refreshAssets();
     createMenu_->setEnabled(false);
+    workspaceMenu_->setEnabled(false);
     for (auto* action:nativeCreationActions_) action->setEnabled(false);
     createImageAction_->setEnabled(false);
+    frameAction_->setEnabled(false);
     for (auto* action : {saveAction_,restore_,undo_,redo_,duplicate_,repeat_,erase_,playAction_,homeAction_}) action->setEnabled(false);
     backend_->hide();
     const auto path=QSettings().value("recentProject").toString();
@@ -201,11 +213,9 @@ void StudioWindow::attach(platz::Project project) {
     selected_=project_->objects().empty() ? std::string{} : project_->objects().front().id;
     pages_->setCurrentIndex(1);
     if (fromHub) {
-        resetPanels();
-        const auto saved = QSettings().value("studioLayout").toByteArray();
-        if (!saved.isEmpty() && !restoreState(saved,1)) resetPanels();
-        tools_->show();
+        applyWorkspace();
     }
+    workspaceMenu_->setEnabled(true);
     sceneDock_->toggleViewAction()->setEnabled(true);
     inspectorDock_->toggleViewAction()->setEnabled(true);
     assetsDock_->toggleViewAction()->setEnabled(true);
@@ -240,7 +250,7 @@ void StudioWindow::newProject() {
 }
 void StudioWindow::closeEvent(QCloseEvent* event) {
     if (!confirmLeave()) {event->ignore();return;}
-    if (project_) QSettings().setValue("studioLayout",saveState(1));
+    captureWorkspace();
     event->accept();
 }
 
@@ -266,13 +276,16 @@ void StudioWindow::refresh(const std::string& preferredAsset) {
     }
     count_->setText(tr("WORLD   /   %1 OBJECTS").arg(objects.size()));
     projectTitle_->setText(QString::fromStdString(project_->name()));
+    const auto title=QString::fromStdString(project_->name());
+    projectTitle_->setText(projectTitle_->fontMetrics().elidedText(title,Qt::ElideRight,224));
+    projectTitle_->setToolTip(title);
     auto suffix = project_->dirty() ? tr("  ·  Unsaved") : QString{};
-    setWindowTitle(projectTitle_->text()+suffix+tr(" · PLATZ Studio"));
+    setWindowTitle(title+suffix+tr(" · PLATZ Studio"));
     mode_->setText(runtime_ ? tr("Play  ·  runtime copy") : tr("Authoring  ·  revision %1%2").arg(project_->revision()).arg(suffix));
     play_->setText(runtime_ ? tr("■  Stop") : tr("▶  Play"));
     playAction_->setText(runtime_ ? tr("Stop") : tr("Play"));
-    controls_->setText(runtime_ ? tr("Click to turn an object   ·   WASD move   ·   Esc stop") :
-                                   tr("RMB orbit   ·   MMB pan   ·   Wheel zoom   ·   F frame"));
+    syncControlHelp();
+    frameAction_->setEnabled(true);
     playAction_->setEnabled(true);
     transformControls_->setEnabled(!runtime_);
     createMenu_->setEnabled(!runtime_);

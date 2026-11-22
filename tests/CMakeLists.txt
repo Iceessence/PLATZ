@@ -27,7 +27,10 @@ add_test(NAME studio_edit_play_reopen COMMAND platz_studio_checks)
 add_test(NAME studio_transform_highdpi COMMAND platz_studio_checks --gizmo-only)
 add_test(NAME studio_native_geometry COMMAND platz_studio_checks --native-mesh-only)
 add_test(NAME studio_native_images COMMAND platz_studio_checks --image-only)
-set(studio_checks studio_edit_play_reopen studio_transform_highdpi studio_native_geometry studio_native_images)
+add_test(NAME studio_workspaces COMMAND platz_studio_checks --workspaces)
+add_test(NAME studio_workspaces_highdpi COMMAND platz_studio_checks --workspaces --highdpi)
+set(studio_checks studio_edit_play_reopen studio_transform_highdpi studio_native_geometry studio_native_images
+    studio_workspaces studio_workspaces_highdpi)
 set_tests_properties(${studio_checks} PROPERTIES LABELS "hardware;interactive" TIMEOUT 90 RUN_SERIAL TRUE)
 set_tests_properties(${studio_checks} PROPERTIES
     ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
@@ -38,7 +41,7 @@ set_tests_properties(${all_gpu_checks} PROPERTIES
     FAIL_REGULAR_EXPRESSION "PLATZ Vulkan ERROR|SYNC-HAZARD|Validation Error:"
     ENVIRONMENT "PLATZ_VK_VALIDATION=1;VK_LAYER_PATH=${PROJECT_SOURCE_DIR}/.deps/graphics/sdk/Bin;VK_KHRONOS_VALIDATION_VALIDATE_SYNC=true")
 set_property(TEST hardware_gpu_assisted APPEND PROPERTY ENVIRONMENT "VK_KHRONOS_VALIDATION_GPUAV_ENABLE=true")
-set_property(TEST studio_transform_highdpi APPEND PROPERTY ENVIRONMENT "QT_SCALE_FACTOR=1.5")
+set_property(TEST studio_transform_highdpi studio_workspaces_highdpi APPEND PROPERTY ENVIRONMENT "QT_SCALE_FACTOR=1.5")
 set_target_properties(platz_gpu_checks platz_studio_checks PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests/$<CONFIG>")
 add_executable(platz_process_checks process_checks.cpp)

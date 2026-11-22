@@ -12,6 +12,7 @@
 #include <QProcessEnvironment>
 #include <QTemporaryDir>
 #include <chrono>
+#include <array>
 #include <iostream>
 #include <stdexcept>
 #include <thread>
@@ -94,7 +95,40 @@ void postKey(HWND main, DWORD pid, UINT key) {
     check(PostMessageW(state.hwndFocus,WM_KEYDOWN,key,bits) &&
           PostMessageW(state.hwndFocus,WM_KEYUP,key,bits|0xc0000000UL),"Could not type in PLATZ.");
 }
+void checkBrand(const QString& path) {
+    struct Module {
+        HMODULE handle;
+        ~Module() { if (handle) FreeLibrary(handle); }
+    } module{LoadLibraryExW(path.toStdWString().c_str(),nullptr,LOAD_LIBRARY_AS_DATAFILE|LOAD_LIBRARY_AS_IMAGE_RESOURCE)};
+    check(module.handle,"Could not open application resources.");
+    auto resource=FindResourceW(module.handle,MAKEINTRESOURCEW(1),RT_GROUP_ICON);
+    check(resource,"PLATZ.exe has no Windows icon group.");
+    auto data=LoadResource(module.handle,resource);
+    const auto* entries=static_cast<const BYTE*>(LockResource(data));
+    const auto bytes=SizeofResource(module.handle,resource);
+    check(entries && bytes>=6,"Could not read the icon group directory.");
+    const auto count=unsigned(entries[4])+256u*entries[5];
+    check(count==7 && bytes>=6+14*count,"Windows icon size table is incomplete.");
+    const std::array<int,7> expected{16,24,32,48,64,128,256};
+    for (unsigned i=0;i<count;++i) {
+        const auto* row=entries+6+14*i;
+        const int size=row[0] ? row[0] : 256;
+        check(size==expected[i] && row[0]==row[1],"Windows icon entry has incorrect dimensions.");
+        auto icon=static_cast<HICON>(LoadImageW(module.handle,MAKEINTRESOURCEW(1),IMAGE_ICON,size,size,0));
+        check(icon,"Windows failed to load a packaged icon size.");
+        ICONINFO info{};
+        const auto read=GetIconInfo(icon,&info);
+        BITMAP bitmap{};
+        const auto complete=read && info.hbmColor && GetObjectW(info.hbmColor,sizeof(bitmap),&bitmap);
+        if (info.hbmColor) DeleteObject(info.hbmColor);
+        if (info.hbmMask) DeleteObject(info.hbmMask);
+        DestroyIcon(icon);
+        check(complete && bitmap.bmWidth==size && bitmap.bmHeight==size,"Windows returned an incorrectly sized icon.");
+    }
+    std::cout<<"PASS Windows icon group loads 16, 24, 32, 48, 64, 128 and 256 px resources.\n";
+}
 void run(const QString& executable, const QString& source, IUIAutomation& automation) {
+    checkBrand(executable);
     QTemporaryDir dir;
     check(dir.isValid(),"Temporary project folder unavailable.");
     auto copy=dir.filePath("Process restart.platz");
@@ -122,6 +156,9 @@ void run(const QString& executable, const QString& source, IUIAutomation& automa
         waitFor(child,"PLATZ Studio did not open the project.",[&]{
             EnumWindows(findWindow,reinterpret_cast<LPARAM>(&search)); return search.window != nullptr;
         });
+        DWORD_PTR windowIcon=0;
+        check(SendMessageTimeoutW(search.window,WM_GETICON,ICON_SMALL,0,SMTO_ABORTIFHUNG,2000,&windowIcon) &&
+              windowIcon,"Open application window does not expose its small icon.");
         Element root, editor;
         checkCall(automation.ElementFromHandle(search.window,&root),"PLATZ does not expose an accessibility root.");
         waitFor(child,"Object name missing from the accessible Inspector.",[&]{
