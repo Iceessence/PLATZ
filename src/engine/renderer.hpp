@@ -10,6 +10,7 @@
 
 namespace platz::engine {
 using Vec3 = std::array<float, 3>;
+inline constexpr float perspectiveFovDegrees = 47.f;
 enum class Mesh { Cube, Sphere, Cylinder, Imported = 4 };
 
 struct DrawObject {
@@ -33,12 +34,18 @@ struct Camera {
     void move(float right, float up, float forward); // World distances.
     void frame(Vec3 center, Vec3 dimensions);
     void frameObject(const DrawObject& object, float aspect);
+    float nearPlane() const;
+    float farPlane() const;
 };
 
 struct Capture {
     unsigned width{}, height{};
     std::vector<std::uint8_t> rgba;
     std::vector<std::uint32_t> tokens;
+};
+struct OverlayVertex {
+    std::array<float,2> position; // Clip-space position, with positive Y up.
+    Vec3 color;                  // SDR display color.
 };
 
 class Renderer {
@@ -50,7 +57,8 @@ class Renderer {
     Renderer(const Renderer&) = delete;
     Renderer& operator=(const Renderer&) = delete;
     void resize(unsigned width, unsigned height);
-    void draw(std::span<const DrawObject> objects, const Camera& camera, std::uint32_t selected = 0);
+    void draw(std::span<const DrawObject> objects, const Camera& camera, std::uint32_t selected = 0,
+              std::span<const OverlayVertex> overlay = {});
     std::uint32_t pick(int x, int y); // Physical client coordinates of the last frame.
     Capture capture();                // Explicit synchronous readback of the last frame.
     const std::string& adapter() const;

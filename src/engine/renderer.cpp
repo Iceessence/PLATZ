@@ -18,7 +18,7 @@ using namespace DirectX;
 using namespace gpu;
 namespace {
 using Clock = std::chrono::steady_clock;
-constexpr float fov = XMConvertToRadians(47.f);
+constexpr float fov = XMConvertToRadians(perspectiveFovDegrees);
 XMVECTOR vector(Vec3 v) {
     return XMVectorSet(v[0], v[1], v[2], 0);
 }
@@ -140,6 +140,8 @@ void Camera::orbit(float dx, float dy) {
 void Camera::zoom(float steps) {
     distance = std::clamp(distance * std::exp(-steps * .14f), .002f, 2.e10f);
 }
+float Camera::nearPlane() const { return std::max(.00001f,distance*.001f); }
+float Camera::farPlane() const { return std::max(2000.f,distance*5.f); }
 void Camera::move(float right, float up, float forward) {
     target[0] += std::cos(yaw) * right - std::sin(yaw) * forward;
     target[1] += up;
@@ -218,6 +220,8 @@ struct Frame {
     VkDescriptorSet constants{};
     VkQueryPool timing{};
     Buffer uniforms;
+    Buffer overlayVertices;
+    uint32_t overlayCount{};
     Image color, ids, depth;
     bool rendered{};
 };
@@ -254,7 +258,7 @@ struct Renderer::Impl {
     VkDescriptorSetLayout textureLayout{};
     VkDescriptorPool descriptors{};
     VkPipelineLayout layout{};
-    VkPipeline pipeline{}, ground{};
+    VkPipeline pipeline{}, ground{}, overlayPipeline{};
     VkCommandPool transferPool{};
     VkCommandBuffer transferCmd{};
     VkFence transferFence{};
@@ -281,7 +285,7 @@ struct Renderer::Impl {
     void finishTransfer();
     void prepare(Frame&, std::span<const SceneDraw>, const Camera&, uint32_t);
     void record(Frame&, std::span<const SceneDraw>, uint32_t);
-    void draw(std::span<const DrawObject>, const Camera&, uint32_t);
+    void draw(std::span<const DrawObject>, const Camera&, uint32_t, std::span<const OverlayVertex>);
     Capture read(uint32_t, uint32_t, uint32_t, uint32_t, bool);
     ~Impl();
 };
@@ -370,6 +374,8 @@ Renderer::Impl::~Impl() {
         vkDestroyPipeline(d.device, pipeline, nullptr);
     if (ground)
         vkDestroyPipeline(d.device, ground, nullptr);
+    if (overlayPipeline)
+        vkDestroyPipeline(d.device, overlayPipeline, nullptr);
     if (layout)
         vkDestroyPipelineLayout(d.device, layout, nullptr);
     textures.reset();
@@ -646,6 +652,8 @@ void Renderer::Impl::makePipelines() {
         vkDestroyPipeline(d.device, std::exchange(pipeline, VK_NULL_HANDLE), nullptr);
     if (ground)
         vkDestroyPipeline(d.device, std::exchange(ground, VK_NULL_HANDLE), nullptr);
+    if (overlayPipeline)
+        vkDestroyPipeline(d.device, std::exchange(overlayPipeline, VK_NULL_HANDLE), nullptr);
     auto makeModule = [&](std::span<const uint32_t> code) {
         VkShaderModule module{};
         VkShaderModuleCreateInfo ci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
@@ -731,6 +739,22 @@ void Renderer::Impl::makePipelines() {
     depthTest.depthWriteEnable = VK_FALSE;
     check(vkCreateGraphicsPipelines(d.device, {}, 1, &ci, nullptr, &ground),
           "Creating construction grid pipeline");
+    Modules overlayModules{d.device};
+    overlayModules.vs=makeModule(shaders::overlayVertex);
+    overlayModules.fs=makeModule(shaders::overlayFragment);
+    stages[0].module=overlayModules.vs;
+    stages[1].module=overlayModules.fs;
+    stream.stride=sizeof(OverlayVertex);
+    const VkVertexInputAttributeDescription overlayInputs[]={
+        {0,0,VK_FORMAT_R32G32_SFLOAT,offsetof(OverlayVertex,position)},
+        {1,0,VK_FORMAT_R32G32B32_SFLOAT,offsetof(OverlayVertex,color)}};
+    vertex.vertexAttributeDescriptionCount=static_cast<uint32_t>(std::size(overlayInputs));
+    vertex.pVertexAttributeDescriptions=overlayInputs;
+    rendering.colorAttachmentCount=1;
+    rendering.depthAttachmentFormat=VK_FORMAT_UNDEFINED;
+    blend.attachmentCount=1;
+    ci.pDepthStencilState=nullptr;
+    check(vkCreateGraphicsPipelines(d.device,{},1,&ci,nullptr,&overlayPipeline),"Creating viewport overlay");
     d.label(VK_OBJECT_TYPE_PIPELINE, reinterpret_cast<uint64_t>(pipeline), "Opaque meshes and identity");
     pipelineMs = std::chrono::duration<double, std::milli>(Clock::now() - begin).count();
 }
@@ -766,7 +790,7 @@ void Renderer::Impl::prepare(Frame& f, std::span<const SceneDraw> draws, const C
     auto center = vector(camera.target), eye = center + offset(camera) * camera.distance;
     auto view = XMMatrixLookAtRH(eye, center, XMVectorSet(0, 1, 0, 0));
     auto projection = XMMatrixPerspectiveFovRH(fov, float(extent.width) / float(extent.height),
-        std::max(.00001f,camera.distance*.001f),std::max(2000.f,camera.distance*5.f));
+        camera.nearPlane(),camera.farPlane());
     XMStoreFloat4x4(&c.viewProjection, view * projection);
     XMStoreFloat3(&c.eye, eye);
     c.selected = selected;
@@ -868,6 +892,21 @@ void Renderer::Impl::record(Frame& f, std::span<const SceneDraw> draws, uint32_t
     for (size_t i = 0; i < draws.size(); ++i)
         submit(i+1,draws[i].range,draws[i].texture);
     vkCmdEndRendering(cmd);
+    if (f.overlayCount) {
+        // The overlay loads only SDR color. Scene depth and picking are separate attachments.
+        imageBarrier(cmd,f.color.handle,f.color.aspect,VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+            VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+            VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT|VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+        colors[0].loadOp=VK_ATTACHMENT_LOAD_OP_LOAD;
+        render.colorAttachmentCount=1;
+        render.pDepthAttachment=nullptr;
+        vkCmdBeginRendering(cmd,&render);
+        vkCmdBindPipeline(cmd,VK_PIPELINE_BIND_POINT_GRAPHICS,overlayPipeline);
+        vkCmdBindVertexBuffers(cmd,0,1,&f.overlayVertices.handle,&zero);
+        vkCmdDraw(cmd,f.overlayCount,1,0,0);
+        vkCmdEndRendering(cmd);
+    }
     for (auto* image : {&f.color, &f.ids})
         imageBarrier(cmd, image->handle, image->aspect, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                      VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
@@ -889,7 +928,8 @@ void Renderer::Impl::record(Frame& f, std::span<const SceneDraw> draws, uint32_t
         vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT, f.timing, 1);
     check(vkEndCommandBuffer(cmd), "Closing viewport commands");
 }
-void Renderer::Impl::draw(std::span<const DrawObject> objects, const Camera& camera, uint32_t selected) {
+void Renderer::Impl::draw(std::span<const DrawObject> objects, const Camera& camera, uint32_t selected,
+                          std::span<const OverlayVertex> overlay) {
     auto begin = Clock::now();
     if (pendingResize)
         rebuild();
@@ -935,6 +975,16 @@ void Renderer::Impl::draw(std::span<const DrawObject> objects, const Camera& cam
         gpuMs = double((times[1] - times[0]) & mask) * d.properties.limits.timestampPeriod / 1e6;
     }
     vmaSetCurrentFrameIndex(d.allocator, ++frameNumber);
+    if (overlay.size()>8192 || overlay.size()%3)
+        throw std::runtime_error("Viewport overlay has an invalid triangle count.");
+    f.overlayCount=static_cast<uint32_t>(overlay.size());
+    if (!overlay.empty()) {
+        const auto bytes=overlay.size_bytes();
+        if (f.overlayVertices.size<bytes)
+            f.overlayVertices=d.buffer(bytes,VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,MemoryIntent::Upload,"Gizmo vertices");
+        std::memcpy(f.overlayVertices.mapped,overlay.data(),bytes);
+        check(vmaFlushAllocation(d.allocator,f.overlayVertices.allocation,0,bytes),"Flushing viewport overlay");
+    }
     prepare(f, draws, camera, selected);
     uint32_t idx{};
     VkResult acquired = vkAcquireNextImageKHR(d.device, chain, timeout, f.acquired, {}, &idx);
@@ -1032,8 +1082,9 @@ void Renderer::resize(unsigned w, unsigned h) {
         impl_->drawn = false;
     }
 }
-void Renderer::draw(std::span<const DrawObject> objects, const Camera& c, uint32_t selected) {
-    impl_->draw(objects, c, selected);
+void Renderer::draw(std::span<const DrawObject> objects, const Camera& c, uint32_t selected,
+                    std::span<const OverlayVertex> overlay) {
+    impl_->draw(objects, c, selected, overlay);
 }
 uint32_t Renderer::pick(int x, int y) {
     if (!impl_->drawn || x < 0 || y < 0 || static_cast<unsigned>(x) >= impl_->extent.width ||

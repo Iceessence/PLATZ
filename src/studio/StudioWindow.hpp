@@ -1,14 +1,17 @@
 #pragma once
 #include "Project.hpp"
+#include "TransformGizmo.hpp"
 #include <QMainWindow>
 #include <array>
 #include <functional>
 #include <optional>
 
 class QAction;
+class QButtonGroup;
 class QCheckBox;
 class QCloseEvent;
 class QComboBox;
+class QColor;
 class QDockWidget;
 class QDoubleSpinBox;
 class QLabel;
@@ -17,6 +20,7 @@ class QListWidget;
 class QPushButton;
 class QStackedWidget;
 class QToolBar;
+class QToolButton;
 class QTreeWidget;
 class Viewport;
 
@@ -29,6 +33,10 @@ protected:
 private:
     std::optional<platz::Project> project_;
     std::optional<platz::Runtime> runtime_;
+    std::optional<platz::ObjectEdit> preview_;
+    QWidget* previewEditor_{};
+    bool previewInputValid_{};
+    std::function<void()> stopScrubbing_;
     std::string selected_, beforePlay_;
     QStackedWidget* pages_{};
     Viewport* viewport_{};
@@ -36,6 +44,14 @@ private:
     QWidget* inspector_{};
     QDockWidget *sceneDock_{}, *inspectorDock_{}, *assetsDock_{};
     QToolBar* tools_{};
+    QWidget* transformControls_{};
+    QButtonGroup* transformModes_{};
+    QComboBox* transformSpace_{};
+    QLabel* scaleSpace_{};
+    QToolButton* transformSnap_{};
+    QDoubleSpinBox* transformStep_{};
+    std::array<double,4> snapSteps_{1.0,1.0,15.0,0.1};
+    platz::studio::TransformTool transformTool_=platz::studio::TransformTool::Select;
     QListWidget* tree_{};
     QLineEdit *name_{}, *color_{};
     QComboBox* materialSlot_{};
@@ -62,6 +78,18 @@ private:
     void buildStudio();
     void buildInspector();
     void buildAssets();
+    void buildTransformControls(QWidget* host);
+    void setTransformTool(platz::studio::TransformTool tool);
+    void configureManipulator();
+    bool beginPreview(const std::string& id);
+    void previewTransform(const platz::studio::TransformValue& value);
+    bool beginFieldPreview(QWidget* editor);
+    void previewField(QWidget* editor, const std::function<void(platz::Object&)>& change);
+    void finishFieldPreview(QWidget* editor);
+    void finishPreview(bool commit);
+    void cancelPreview();
+    void previewColor(QWidget* editor, QColor color);
+    void syncTransform(const platz::Object& object);
     void refreshAssets(const std::string& preferred = {});
     void updateAssetActions();
     std::string selectedAsset() const;
@@ -77,7 +105,7 @@ private:
     void syncMaterial(const platz::Object* object);
     void applyEdit(const std::function<void(platz::Object&)>& change);
     void finishActiveField();
-    void select(const std::string& id, bool fromViewport);
+    void select(std::string id, bool fromViewport);
     void togglePlay();
     void protectedCall(const std::function<void()>& work);
     void notify(const QString& message);

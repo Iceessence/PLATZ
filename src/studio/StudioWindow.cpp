@@ -96,11 +96,12 @@ void StudioWindow::buildMenus() {
     auto* run = menuBar()->addMenu(tr("&Runtime"));
     playAction_=run->addAction(tr("Play"),QKeySequence(Qt::Key_F5),this,&StudioWindow::togglePlay);
     auto* stop = new QShortcut(QKeySequence(Qt::Key_Escape),this);
-    connect(stop,&QShortcut::activated,this,[this]{if(runtime_) togglePlay();});
+    connect(stop,&QShortcut::activated,this,[this]{if(runtime_) togglePlay(); else cancelPreview();});
     auto* help = menuBar()->addMenu(tr("&Help"));
     help->addAction(tr("Studio controls"),this,[this]{
         QMessageBox::information(this,tr("Studio controls"),
-            tr("Select an object in the scene list or click its surface. Edit a value in the Inspector and press Enter.\n\n"
+            tr("Select an object in the scene list or click its surface. In the viewport, use 1 Select, 2 Move, 3 Rotate or 4 Scale. Drag a handle and release to apply. Escape cancels.\n\n"
+               "Inspector transform and base-color edits preview as you type. Press Enter or leave the field to apply valid input. Drag a numeric axis label to scrub and hold Shift for finer adjustments. Escape restores the previous value.\n\n"
                "Right drag to orbit, middle drag to pan, or use the wheel to zoom. With the viewport focused, use arrow keys to orbit, WASD to move, F to frame the selection and Home to reset.\n\n"
                "Use F5 for Play. Click an object or press Space to turn it. Escape returns to the authored scene. Ctrl+S saves the project."));
     });
@@ -130,11 +131,14 @@ void StudioWindow::protectedCall(const std::function<void()>& work) {
     }
 }
 void StudioWindow::finishActiveField() {
+    if (stopScrubbing_) finishPreview(false);
     auto* field=focusWidget();
     if (field && inspector_->isAncestorOf(field)) field->clearFocus();
+    if (previewEditor_) finishFieldPreview(previewEditor_);
 }
 bool StudioWindow::saveChanges() {
     if (!project_ || runtime_) return false;
+    viewport_->cancelDrag();
     finishActiveField();
     try {
         project_->save();
@@ -147,6 +151,7 @@ bool StudioWindow::saveChanges() {
     }
 }
 bool StudioWindow::confirmLeave() {
+    viewport_->cancelDrag();
     finishActiveField();
     if (runtime_) togglePlay();
     if (!project_ || !project_->dirty()) return true;
@@ -226,6 +231,13 @@ void StudioWindow::closeEvent(QCloseEvent* event) {
 
 void StudioWindow::refresh(const std::string& preferredAsset) {
     if (!project_) return;
+    if (stopScrubbing_) {
+        stopScrubbing_();
+        stopScrubbing_={};
+    }
+    preview_.reset();
+    previewEditor_=nullptr;
+    previewInputValid_=false;
     QScopedValueRollback<bool> refreshing(refreshing_,true);
     const auto& objects=runtime_ ? runtime_->objects() : project_->objects();
     if (!selected_.empty() && !project_->find(selected_))
@@ -247,6 +259,7 @@ void StudioWindow::refresh(const std::string& preferredAsset) {
     controls_->setText(runtime_ ? tr("Click to turn an object   ·   WASD move   ·   Esc stop") :
                                    tr("RMB orbit   ·   MMB pan   ·   Wheel zoom   ·   F frame"));
     playAction_->setEnabled(true);
+    transformControls_->setEnabled(!runtime_);
     homeAction_->setEnabled(true);
     add_->setEnabled(!runtime_);
     undo_->setEnabled(!runtime_ && project_->canUndo());
@@ -287,7 +300,11 @@ void StudioWindow::syncInspector() {
         .arg(object->asset.data->vertices().size()).arg(object->asset.data->indices().size()/3));
     mesh_->setToolTip(object->asset.data ? QString::fromStdString("SHA-256 "+object->asset.data->digest()) : QString{});
     identity_->setText(QString::fromStdString(object->id));
-    const std::array vectors{object->position,object->rotation,object->scale};
+    syncTransform(*object);
+}
+void StudioWindow::syncTransform(const platz::Object& object) {
+    const QScopedValueRollback<bool> refreshing(refreshing_,true);
+    const std::array vectors{object.position,object.rotation,object.scale};
     for (std::size_t g=0;g<vectors.size();++g) {
         const auto v=vectors[g];
         axis_[g*3]->setValue(v.x); axis_[g*3+1]->setValue(v.y); axis_[g*3+2]->setValue(v.z);
@@ -353,14 +370,17 @@ void StudioWindow::applyEdit(const std::function<void(platz::Object&)>& change) 
         notify(tr("Unsaved changes"));
     });
 }
-void StudioWindow::select(const std::string& id,bool fromViewport) {
+void StudioWindow::select(std::string id,bool fromViewport) {
     if (!project_ || refreshing_) return;
     // A viewport event can refer to the image immediately preceding a scene update.
     if (!id.empty() && !project_->find(id)) return;
+    if (preview_) cancelPreview();
     selected_=id;
     if (runtime_ && fromViewport && runtime_->interact(id)) notify(tr("Turned runtime object"));
     QScopedValueRollback<bool> refreshing(refreshing_,true);
-    if(fromViewport) {
+    const auto* rowItem=tree_->currentItem();
+    const auto rowId=rowItem ? rowItem->data(Qt::UserRole).toString().toStdString() : std::string{};
+    if (id!=rowId) {
         int row=-1;
         for(int i=0;i<tree_->count();++i) if (tree_->item(i)->data(Qt::UserRole).toString().toStdString()==id) {row=i;break;}
         tree_->setCurrentRow(row);
@@ -370,6 +390,7 @@ void StudioWindow::select(const std::string& id,bool fromViewport) {
 }
 void StudioWindow::togglePlay() {
     if (!project_) return;
+    viewport_->cancelDrag();
     finishActiveField();
     if (runtime_) {
         runtime_.reset(); selected_=beforePlay_; viewport_->endPlay();

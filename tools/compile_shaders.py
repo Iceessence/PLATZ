@@ -53,6 +53,9 @@ def build(source, output, compiler, validator):
         work = Path(scratch)
         vert, vr = compile_stage(source, compiler, validator, work, "vsMain", "vertex")
         frag, fr = compile_stage(source, compiler, validator, work, "psMain", "fragment")
+        overlay_source = source.with_name("overlay.slang")
+        overlay_vert, _ = compile_stage(overlay_source, compiler, validator, work, "overlayVS", "vertex")
+        overlay_frag, _ = compile_stage(overlay_source, compiler, validator, work, "overlayPS", "fragment")
         if layout(vr) != layout(fr):
             raise ValueError("Vertex and fragment parameter layouts disagree")
         group, binding, size, offsets = layout(vr)
@@ -63,7 +66,8 @@ def build(source, output, compiler, validator):
             "namespace offset {"]
         for field, offset in offsets.items():
             header.append(f"inline constexpr unsigned {field}={offset};")
-        header += ["}", words("vertex", vert), words("fragment", frag), "}", ""]
+        header += ["}", words("vertex", vert), words("fragment", frag), words("overlayVertex", overlay_vert),
+                   words("overlayFragment", overlay_frag), "}", ""]
         next_header = work / "scene_spv.hpp"
         next_header.write_bytes("\n".join(header).encode("ascii"))
         os.replace(next_header, output)

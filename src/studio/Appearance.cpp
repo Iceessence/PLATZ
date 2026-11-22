@@ -71,6 +71,7 @@ QDockWidget::title { background: #20292f; padding: 9px 10px; border-bottom: 1px 
 QMainWindow::separator { background: #323d43; width: 2px; height: 2px; }
 QPushButton, QToolButton { background: #2a353b; color: #dfebe7; border: 1px solid #425056; border-radius: 5px; padding: 6px 11px; }
 QPushButton:hover, QToolButton:hover { background: #38464d; }
+QToolButton:checked { background: #254840; color: #d7fff0; border-color: #68bd9f; }
 QPushButton:focus, QToolButton:focus, QLineEdit:focus { border: 1px solid #7fe3bc; }
 QPushButton:disabled, QToolButton:disabled { color: #879094; background: #222b30; border-color: #303a40; }
 QPushButton[accent="true"] { color: #102c23; background: #86e8bd; border-color: #97f1cc; font-weight: 650; }

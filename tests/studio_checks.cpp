@@ -5,24 +5,30 @@
 #include <QAction>
 #include <QCheckBox>
 #include <QComboBox>
+#include <QColorDialog>
 #include <QDockWidget>
 #include <QInputMethodEvent>
 #include <QMenu>
 #include <QDoubleSpinBox>
 #include <QFile>
 #include <QFileDialog>
+#include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
+#include <QMouseEvent>
 #include <QPushButton>
 #include <QSettings>
 #include <QTemporaryDir>
 #include <QTest>
 #include <QTimer>
+#include <QToolButton>
 #include <QTreeWidget>
 #include <QSpinBox>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <iostream>
+#include <numbers>
 #include <stdexcept>
 
 namespace {
@@ -373,6 +379,305 @@ void exerciseTextures(QTemporaryDir& dir) {
     }
     std::cout<<"Studio texture switching, undo/redo, Play isolation and pixel-identical reopen passed\n";
 }
+
+void exerciseViewportTransforms(QTemporaryDir& dir, bool scaled) {
+    using namespace platz::studio;
+    const auto path=dir.filePath("Viewport transforms.platz");
+    const std::filesystem::path file(path.toStdWString());
+    StudioWindow window;
+    expose(window);
+    fileAction(window,Qt::Key_N,path);
+    auto* viewport=static_cast<Viewport*>(control<QWidget>(window,"viewport"));
+    if (scaled) check(viewport->devicePixelRatioF()>1,"High DPI test requires a scaled viewport");
+    auto* tree=control<QListWidget>(window,"sceneTree");
+    auto* revision=control<QLabel>(window,"authoringMode");
+    auto* position=control<QDoubleSpinBox>(window,"positionX");
+    auto* scale=control<QDoubleSpinBox>(window,"scaleX");
+    auto* play=control<QPushButton>(window,"playButton");
+    const auto original=platz::Project::open(file);
+    const auto& object=original.objects().at(3);
+    const auto originalFrame=settledFrame(*viewport);
+    QTest::mouseClick(viewport,Qt::LeftButton,{},visiblePoint(originalFrame,4,*viewport));
+    check(tree->currentRow()==3,"Viewport transform test failed to select the block");
+    const auto originalCaption=revision->text();
+
+    auto cursor=[&](QPoint point,Qt::MouseButtons buttons=Qt::LeftButton) {
+        QMouseEvent move(QEvent::MouseMove,point,viewport->mapToGlobal(point),Qt::NoButton,buttons,Qt::NoModifier);
+        QApplication::sendEvent(viewport,&move);
+    };
+    auto start=[&](QPoint point) {
+        QTest::mousePress(viewport,Qt::LeftButton,{},point);
+        check(viewport->dragging(),"Manipulator failed to capture a valid handle");
+    };
+    auto release=[&](QPoint point) {QTest::mouseRelease(viewport,Qt::LeftButton,{},point);};
+    auto key=[&](Qt::Key code,Qt::KeyboardModifiers modifiers=Qt::NoModifier) {
+        viewport->setFocus();
+        QTest::keyClick(viewport,code,modifiers);
+        QApplication::processEvents();
+    };
+    auto lineDrag=[&]() {
+        const auto paths=viewport->manipulatorPaths();
+        const auto& line=paths.axes[0];
+        check(line.size()==2,"Expected a projected X axis");
+        const auto point=(line.front()*.3+line.back()*.7).toPoint();
+        check(hitGizmo(paths,point)==0,"Expected an unambiguous X axis start");
+        return std::pair{point,(line.back()+(line.back()-line.front())*.85).toPoint()};
+    };
+    key(Qt::Key_2);
+    check(control<QToolButton>(window,"toolMove")->isChecked(),"Viewport keyboard shortcut failed");
+    const auto [from,to]=lineDrag();
+    const auto before=settledFrame(*viewport);
+    check(before.tokens==originalFrame.tokens && before.rgba!=originalFrame.rgba,
+          "Rendered viewport handles changed object IDs or failed to appear");
+    start(from);
+    release(from);
+    check(revision->text()==originalCaption,"A zero-motion drag created a revision");
+    start(from);
+    const auto begin=std::chrono::steady_clock::now();
+    cursor(to);
+    const auto preview=settledFrame(*viewport);
+    const auto measured=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-begin).count();
+    check(std::abs(position->value()-object.position.x)>.15 && preview.tokens!=before.tokens,
+          "Live drag did not update the Inspector and GPU geometry");
+    check(platz::Project::open(file).revision()==original.revision(),"Live preview wrote project data");
+    key(Qt::Key_Escape);
+    release(to);
+    check(!viewport->dragging() && settledFrame(*viewport).tokens==before.tokens &&
+          revision->text()==originalCaption,"Escape left a preview or revision");
+    start(from);
+    cursor(to);
+    cursor(to,Qt::NoButton);
+    release(to);
+    check(!viewport->dragging() && revision->text()==originalCaption &&
+          settledFrame(*viewport).tokens==before.tokens,"Lost mouse capture left a preview or revision");
+    start(from);
+    cursor(to);
+    const double moved=position->value();
+    release(to);
+    check(!viewport->dragging() && position->value()==moved && revision->text()!=originalCaption,
+          "Release did not commit the displayed move");
+    key(Qt::Key_Z,Qt::ControlModifier);
+    check(std::abs(position->value()-object.position.x)<.001 &&
+          settledFrame(*viewport).tokens==before.tokens,"Drag required more than one Undo");
+    key(Qt::Key_Y,Qt::ControlModifier);
+    check(position->value()==moved && settledFrame(*viewport).tokens==preview.tokens,"Redo lost the move");
+
+    key(Qt::Key_3);
+    const auto rings=viewport->manipulatorPaths();
+    int rotatedAxis=-1;
+    QPoint ringStart, ringEnd;
+    for (int axis:{1,2,0}) {
+        const auto& points=rings.axes[axis];
+        for (size_t index=0;index+9<points.size();++index) {
+            const auto candidate=points[index].toPoint();
+            if (hitGizmo(rings,candidate)!=axis || !viewport->rect().contains(candidate)) continue;
+            ringStart=candidate;
+            ringEnd=points[index+9].toPoint();
+            rotatedAxis=axis;
+            break;
+        }
+        if (rotatedAxis>=0) break;
+    }
+    check(rotatedAxis>=0,"Expected an accessible rotation ring");
+    const auto unrotated=settledFrame(*viewport);
+    start(ringStart);
+    cursor(ringEnd);
+    const auto rotated=settledFrame(*viewport);
+    check(rotated.tokens!=unrotated.tokens,"Rotation ring did not change rendered geometry");
+    release(ringEnd);
+    check(settledFrame(*viewport).tokens==rotated.tokens,"Release did not preserve rotation");
+
+    key(Qt::Key_4);
+    QTest::mouseClick(control<QToolButton>(window,"transformSnap"),Qt::LeftButton);
+    const auto [scaleFrom,scaleTo]=lineDrag();
+    const auto unscaled=settledFrame(*viewport);
+    start(scaleFrom);
+    cursor(scaleTo);
+    const auto scaledX=scale->value();
+    const auto increment=control<QDoubleSpinBox>(window,"transformStep")->value();
+    check(std::abs(scaledX-object.scale.x)>.05 &&
+          std::abs(scaledX/increment-std::round(scaledX/increment))<.015,
+          "Scale did not update the Inspector or honor its snap step");
+    release(scaleTo);
+    const auto authored=settledFrame(*viewport);
+    check(authored.tokens!=unscaled.tokens,"Snapped Scale did not change rendered geometry");
+    QTest::mouseClick(play,Qt::LeftButton);
+    const auto runtimePaths=viewport->manipulatorPaths();
+    check(!control<QToolButton>(window,"toolScale")->isEnabled() &&
+          std::all_of(runtimePaths.axes.begin(),runtimePaths.axes.end(),[](const auto& axis){return axis.empty();}),
+          "Authoring manipulator remained active during Play");
+    key(Qt::Key_Escape);
+    check(settledFrame(*viewport).tokens==authored.tokens,"Play altered the committed transform");
+    key(Qt::Key_S,Qt::ControlModifier);
+    const auto saved=platz::Project::open(file);
+    const auto* edited=saved.find(object.id);
+    check(edited && std::abs(edited->position.x-moved)<.001 && edited->rotation!=object.rotation &&
+          std::abs(edited->scale.x-scaledX)<.001 && edited->scale.y==object.scale.y &&
+          edited->scale.z==object.scale.z,"Save omitted or corrupted the committed transform");
+    check(window.close(),"Could not close transformed project");
+    StudioWindow reopened;
+    expose(reopened);
+    fileAction(reopened,Qt::Key_O,path);
+    auto* view=static_cast<Viewport*>(control<QWidget>(reopened,"viewport"));
+    check(settledFrame(*view).tokens==authored.tokens,"Reopen did not render the saved transforms");
+    check(reopened.close(),"Could not close reopened transform project");
+    std::cout<<"Studio Move/Rotate/Scale qualified at DPR "<<viewport->devicePixelRatioF()
+             <<"; sampled move through synchronous Vulkan capture: "<<measured<<" ms\n";
+}
+
+void exerciseTransformMath() {
+    using namespace platz::studio;
+    platz::engine::Camera camera;
+    camera.target={0,0,0};
+    camera.yaw=0;
+    camera.pitch=0;
+    camera.distance=10;
+    const QSizeF extent(800,600);
+    const auto pixelPerUnit=30/std::tan(platz::engine::perspectiveFovDegrees*std::numbers::pi/360);
+    const TransformValue original{{-1.2f,0,0},{0,0,90},{1,2,3}};
+    TransformSettings move{TransformTool::Move,false,true,.5f};
+    auto paths=gizmoPaths(camera,extent,original,move);
+    auto world=TransformDrag::start(camera,extent,original,move,0,paths.axes[0].back());
+    check(world.has_value(),"Could not start world-space math test");
+    check(world->move(paths.axes[0].back()).position==original.position,"Snapping moved a zero-distance drag");
+    const auto left=world->move(paths.axes[0].back()-QPointF(pixelPerUnit*.61,0));
+    check(std::abs(left.position.x+2)<.001 && left.position.y==0 && left.position.z==0,
+          "Signed world-axis distance did not snap to the nearest negative coordinate");
+    move.local=true;
+    move.snapping=false;
+    paths=gizmoPaths(camera,extent,original,move);
+    auto local=TransformDrag::start(camera,extent,original,move,0,paths.axes[0].back());
+    check(local.has_value(),"Could not start local-space math test");
+    const auto up=local->move(paths.axes[0].back()-QPointF(0,pixelPerUnit));
+    check(std::abs(up.position.x-original.position.x)<.001 && std::abs(up.position.y-1)<.001,
+          "Local X did not translate along the rotated basis");
+    const TransformSettings scale{TransformTool::Scale,false,false,1};
+    paths=gizmoPaths(camera,extent,original,scale);
+    auto scaling=TransformDrag::start(camera,extent,original,scale,0,paths.axes[0].back());
+    check(scaling.has_value(),"Could not start scale math test");
+    const auto enlarged=scaling->move(paths.axes[0].back()-QPointF(0,76));
+    check(std::abs(enlarged.scale.x-2)<.001 && enlarged.scale.y==2 && enlarged.scale.z==3,
+          "Nonuniform scale changed another local component");
+    const TransformSettings rotate{TransformTool::Rotate,false,true,15};
+    paths=gizmoPaths(camera,extent,original,rotate);
+    auto rotation=TransformDrag::start(camera,extent,original,rotate,2,paths.axes[2].at(0));
+    check(rotation.has_value(),"Could not start ring math test");
+    check(std::abs(std::abs(rotation->move(paths.axes[2].at(16)).rotation.z)-180)<.01,
+          "A quarter turn around Z did not compose with existing orientation");
+}
+
+void exerciseInspectorPreviews(QTemporaryDir& dir) {
+    const auto path=dir.filePath("Inspector previews.platz");
+    const std::filesystem::path file(path.toStdWString());
+    StudioWindow window;
+    expose(window);
+    fileAction(window,Qt::Key_N,path);
+    const auto source=platz::Project::open(file);
+    const auto& object=source.objects().at(3);
+    auto* viewport=static_cast<Viewport*>(control<QWidget>(window,"viewport"));
+    auto* tree=control<QListWidget>(window,"sceneTree");
+    tree->setCurrentRow(3);
+    auto* color=control<QLineEdit>(window,"materialColor");
+    auto* spin=control<QDoubleSpinBox>(window,"positionX");
+    auto* editor=spin->findChild<QLineEdit*>();
+    auto* mode=control<QLabel>(window,"authoringMode");
+    const auto initial=settledFrame(*viewport);
+    const auto revision=mode->text();
+    const auto originalColor=color->text();
+    const auto originalNumber=editor->text();
+    auto draft=[](QLineEdit* field,const QString& value){
+        field->setFocus();
+        QTest::keyClick(field,Qt::Key_A,Qt::ControlModifier);
+        QTest::keyClicks(field,value);
+    };
+    auto key=[&](Qt::Key code,Qt::KeyboardModifiers modifiers=Qt::NoModifier){
+        viewport->setFocus();
+        QTest::keyClick(viewport,code,modifiers);
+    };
+    const auto editedX=spin->locale().toString(object.position.x+.65,'f',2);
+    draft(editor,editedX);
+    const auto moved=settledFrame(*viewport);
+    check(moved.tokens!=initial.tokens && mode->text()!=revision,"Typed number did not preview before Enter");
+    QTest::keyClick(editor,Qt::Key_Escape);
+    check(editor->text()==originalNumber && mode->text()==revision &&
+          settledFrame(*viewport).tokens==initial.tokens,"Escape did not restore typed numeric preview");
+    draft(editor,"-");
+    key(Qt::Key_Home);
+    check(editor->text()==originalNumber && mode->text()==revision,
+          "Leaving an incomplete number did not restore the exact authoring value");
+    draft(editor,editedX);
+    QTest::keyClick(editor,Qt::Key_Return);
+    check(settledFrame(*viewport).tokens==moved.tokens,"Enter changed the rendered numeric preview");
+    key(Qt::Key_Z,Qt::ControlModifier);
+    check(settledFrame(*viewport).tokens==initial.tokens,"Typing created more than one Undo");
+    key(Qt::Key_Y,Qt::ControlModifier);
+
+    auto* scrub=control<QLabel>(window,"positionXScrub");
+    const QPoint from=scrub->rect().center(), to=from+QPoint(31,0);
+    auto scrubMove=[&]{
+        QTest::mousePress(scrub,Qt::LeftButton,{},from);
+        QMouseEvent move(QEvent::MouseMove,to,scrub->mapToGlobal(to),Qt::NoButton,Qt::LeftButton,Qt::NoModifier);
+        QApplication::sendEvent(scrub,&move);
+    };
+    scrubMove();
+    const auto scrubbed=settledFrame(*viewport);
+    check(scrubbed.tokens!=moved.tokens,"Numeric label scrub did not preview");
+    key(Qt::Key_Escape);
+    QTest::mouseRelease(scrub,Qt::LeftButton,{},to);
+    check(settledFrame(*viewport).tokens==moved.tokens && QWidget::mouseGrabber()!=scrub,
+          "Cancelling a scrub left a visible change or active grab");
+    scrubMove();
+    QTest::mouseRelease(scrub,Qt::LeftButton,{},to);
+    check(settledFrame(*viewport).tokens==scrubbed.tokens,"Releasing the scrub failed to commit");
+    key(Qt::Key_Z,Qt::ControlModifier);
+    check(settledFrame(*viewport).tokens==moved.tokens,"Numeric scrub created more than one Undo");
+
+    draft(color,"#3BC9ED");
+    const auto tinted=settledFrame(*viewport);
+    check(tinted.tokens==moved.tokens && tinted.rgba!=moved.rgba,
+          "Typing a complete color did not preview before Enter");
+    QTest::keyClick(color,Qt::Key_Escape);
+    check(color->text()==originalColor && settledFrame(*viewport).rgba==moved.rgba,
+          "Cancelling a color draft did not restore the original pixels");
+    draft(color,"#3BC");
+    QTest::keyClick(color,Qt::Key_Return);
+    check(color->text()==originalColor && settledFrame(*viewport).rgba==moved.rgba,
+          "Invalid color commit changed authored pixels");
+    for (const auto apply : {false,true}) {
+        bool sawPreview=false;
+        QTimer::singleShot(30,[&]{
+            auto* dialog=qobject_cast<QColorDialog*>(QApplication::activeModalWidget());
+            if (!dialog) return;
+            dialog->setCurrentColor(QColor("#3BC9ED"));
+            sawPreview=settledFrame(*viewport).rgba==tinted.rgba;
+            if (apply) dialog->accept(); else dialog->reject();
+        });
+        QTest::mouseClick(control<QPushButton>(window,"colorPicker"),Qt::LeftButton);
+        check(sawPreview,"Live color dialog preview did not match hex presentation");
+        check(settledFrame(*viewport).rgba==(apply?tinted.rgba:moved.rgba),
+              "Color dialog did not apply or cancel the displayed preview");
+    }
+    key(Qt::Key_Z,Qt::ControlModifier);
+    check(settledFrame(*viewport).rgba==moved.rgba,"Color picker did not produce one Undo entry");
+    key(Qt::Key_Y,Qt::ControlModifier);
+    check(platz::Project::open(file).objects()==source.objects(),"Inspector drafts escaped to disk");
+    key(Qt::Key_S,Qt::ControlModifier);
+    const auto saved=platz::Project::open(file);
+    const auto* committed=saved.find(object.id);
+    check(committed && std::abs(committed->position.x-(object.position.x+.65f))<.001 &&
+          committed->color!=object.color,"Saved Inspector source did not match the committed preview");
+    check(window.close(),"Inspector preview test project did not close");
+    StudioWindow reopened;
+    expose(reopened);
+    fileAction(reopened,Qt::Key_O,path);
+    auto* view=static_cast<Viewport*>(control<QWidget>(reopened,"viewport"));
+    control<QListWidget>(reopened,"sceneTree")->setCurrentRow(3);
+    const auto reloaded=settledFrame(*view);
+    check(reloaded.tokens==tinted.tokens && reloaded.rgba==tinted.rgba,"Inspector draft save/reopen changed pixels");
+    check(reopened.close(),"Reopened Inspector preview project did not close");
+    std::cout<<"Live numeric input, scrubbing and color previews passed with cancellation and persisted undoable commits\n";
+}
+
 void exercise(const QString& path, bool create) {
     const std::filesystem::path file(path.toStdWString());
     std::string projectId, sceneId, editedId;
@@ -537,6 +842,13 @@ int main(int argc, char** argv) {
         check(temp.isValid(), "Cannot create isolated test-project directory");
         QSettings::setDefaultFormat(QSettings::IniFormat);
         QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, temp.path());
+        if (app.arguments().contains("--gizmo-only")) {
+            exerciseViewportTransforms(temp,true);
+            return 0;
+        }
+        exerciseTransformMath();
+        exerciseViewportTransforms(temp,false);
+        exerciseInspectorPreviews(temp);
         exercise(temp.filePath("Ordinary.platz"), true);
         const QString copy = temp.filePath("Validation copy.platz");
         check(QFile::copy(QString::fromUtf8(PLATZ_VALIDATION_PATH), copy), "Cannot copy permanent validation project");

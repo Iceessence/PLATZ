@@ -16,6 +16,7 @@ def main():
         source = work / "scene.slang"
         include = work / "color.slangh"
         shutil.copy(root / "src/engine/scene.slang", source)
+        shutil.copy(root / "src/engine/overlay.slang", work / "overlay.slang")
         shutil.copy(root / "src/engine/color.slangh", include)
         output = work / "scene_spv.hpp"
         compile_cmd = [sys.executable, root / "tools/compile_shaders.py", source, output,

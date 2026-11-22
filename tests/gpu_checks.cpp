@@ -102,6 +102,16 @@ void run() {
     check(reversed.tokens == frame.tokens && reversed.rgba == frame.rgba,
           "Opaque depth and colors depend on submission order");
 
+    const std::array<OverlayVertex,3> overlay{{
+        {{-.25f,-.25f},{.4f,1.f,.9f}},
+        {{.25f,-.25f},{.4f,1.f,.9f}},
+        {{0,.25f},{.4f,1.f,.9f}}
+    }};
+    gpu.draw(scene,camera,0,overlay);
+    const auto withOverlay=gpu.capture();
+    check(withOverlay.tokens==frame.tokens && withOverlay.rgba!=frame.rgba &&
+          gpu.pick(width/2,height/2)==shell.token,"Overlay changed picking or failed to draw");
+
     scene.back().color = {0.1f,0.8f,0.9f};
     gpu.draw(scene, camera);
     auto recolored = gpu.capture();

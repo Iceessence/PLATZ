@@ -18,6 +18,7 @@
 #include <QLineEdit>
 #include <QListWidget>
 #include <QMenu>
+#include <QMouseEvent>
 #include <QPushButton>
 #include <QScrollArea>
 #include <QSettings>
@@ -25,8 +26,60 @@
 #include <QStatusBar>
 #include <QTemporaryFile>
 #include <QToolBar>
+#include <algorithm>
+#include <cmath>
 
 namespace {
+class AxisScrubber final : public QLabel {
+public:
+    using QLabel::QLabel;
+    std::function<std::optional<double>()> begin;
+    std::function<void(double)> updateValue;
+    std::function<void(bool)> finish;
+    void stop() {
+        if (!startValue_) return;
+        startValue_.reset();
+        if (mouseGrabber()==this) releaseMouse();
+    }
+protected:
+    void mousePressEvent(QMouseEvent* event) override {
+        if (event->button()!=Qt::LeftButton) return;
+        startValue_=begin();
+        if (!startValue_) return;
+        lastX_=event->globalPosition().x();
+        grabMouse();
+    }
+    void mouseMoveEvent(QMouseEvent* event) override {
+        if (!startValue_) return;
+        if (event->buttons()&Qt::LeftButton) sample(event);
+        else end(false);
+    }
+    void mouseReleaseEvent(QMouseEvent* event) override {
+        if (!startValue_ || event->button()!=Qt::LeftButton) return;
+        sample(event);
+        end(true);
+    }
+    bool event(QEvent* event) override {
+        if (startValue_ && (event->type()==QEvent::WindowDeactivate || event->type()==QEvent::UngrabMouse ||
+                            event->type()==QEvent::Hide)) end(false);
+        return QLabel::event(event);
+    }
+private:
+    void sample(const QMouseEvent* event) {
+        const double sensitivity=event->modifiers().testFlag(Qt::ShiftModifier) ? 0.02 : 0.2;
+        const auto x=event->globalPosition().x();
+        *startValue_+=(x-lastX_)*sensitivity;
+        lastX_=x;
+        updateValue(*startValue_);
+    }
+    void end(bool commit) {
+        stop();
+        finish(commit);
+    }
+    std::optional<double> startValue_;
+    double lastX_{};
+};
+
 QLabel* label(const QString& text, const char* role = "") {
     auto* value = new QLabel(text);
     value->setTextFormat(Qt::PlainText);
@@ -137,8 +190,12 @@ void StudioWindow::buildStudio() {
     bar->addWidget(perspective);
     bar->addStretch();
     mode_ = label(tr("Authoring"),"minor");
+    mode_->setObjectName("authoringMode");
     bar->addWidget(mode_);
     layout->addLayout(bar);
+    transformControls_=new QWidget;
+    buildTransformControls(transformControls_);
+    layout->addWidget(transformControls_);
     viewport_ = new Viewport;
     layout->addWidget(viewport_,1);
     controls_ = label(tr("RMB orbit   ·   MMB pan   ·   Wheel zoom   ·   F frame"),"minor");
@@ -146,8 +203,17 @@ void StudioWindow::buildStudio() {
     layout->addWidget(controls_);
     pages_->addWidget(center);
     viewport_->onBackend = [this](QString adapter){backend_->setText(QString("Vulkan 1.4  ·  %1").arg(adapter));};
-    viewport_->onError = [this](QString error){backend_->setText(tr("Renderer unavailable")); notify(error);};
+    viewport_->onError = [this](QString error){
+        cancelPreview();
+        backend_->setText(tr("Renderer unavailable"));
+        notify(error);
+    };
     viewport_->onPick = [this](const std::string& id){ select(id,true); };
+    viewport_->onDragStart = [this](const std::string& id){return beginPreview(id);};
+    viewport_->onDragUpdate = [this](const auto& value){previewTransform(value);};
+    viewport_->onDragEnd = [this](bool commit){finishPreview(commit);};
+    viewport_->onTool = [this](auto tool){setTransformTool(tool);};
+    configureManipulator();
 
     sceneDock_ = new QDockWidget(tr("Scene"),this);
     sceneDock_->setObjectName("sceneDock");
@@ -232,6 +298,7 @@ void StudioWindow::buildInspector() {
 
     section(box,tr("TRANSFORM"));
     const std::array<QString,3> groups{tr("Position"),tr("Rotation"),tr("Scale")};
+    const std::array<QString,3> fieldIds{"position","rotation","scale"};
     const std::array<QString,3> units{"m","°","×"};
     const std::array<QString,3> axes{"X","Y","Z"};
     for (int group=0;group<3;++group) {
@@ -243,7 +310,7 @@ void StudioWindow::buildInspector() {
             auto* field = new QDoubleSpinBox;
             const int index=group*3+coordinate;
             axis_[index]=field;
-            field->setObjectName(groups[group].toLower()+axes[coordinate]);
+            field->setObjectName(fieldIds[group]+axes[coordinate]);
             field->setAccessibleName(groups[group]+" "+axes[coordinate]);
             field->setToolTip(field->accessibleName());
             field->setDecimals(3);
@@ -256,16 +323,55 @@ void StudioWindow::buildInspector() {
             field->setMinimumWidth(56);
             auto* col=new QVBoxLayout;
             col->setSpacing(2);
-            col->addWidget(label(axes[coordinate],"section"));
+            auto* scrub=new AxisScrubber(axes[coordinate]);
+            scrub->setObjectName(field->objectName()+"Scrub");
+            scrub->setProperty("role","section");
+            scrub->setCursor(Qt::SizeHorCursor);
+            scrub->setToolTip(tr("Drag to adjust %1. Hold Shift for finer steps.").arg(field->accessibleName()));
+            col->addWidget(scrub);
             col->addWidget(field);
             row->addLayout(col);
-            connect(field,&QDoubleSpinBox::valueChanged,this,[this,group,coordinate,field]{
-                applyEdit([&](platz::Object& o){
-                    auto& v = group==0 ? o.position : (group==1 ? o.rotation : o.scale);
-                    auto& component = coordinate==0 ? v.x : (coordinate==1 ? v.y : v.z);
-                    component=static_cast<float>(field->value());
-                });
+            const auto setComponent=[group,coordinate](platz::Object& o,double value){
+                auto& v = group==0 ? o.position : (group==1 ? o.rotation : o.scale);
+                auto& component = coordinate==0 ? v.x : (coordinate==1 ? v.y : v.z);
+                if (std::round(double(component)*1000.0)/1000.0!=value)
+                    component=static_cast<float>(value);
+            };
+            scrub->begin=[this,scrub,field]() -> std::optional<double> {
+                finishActiveField();
+                if (!beginFieldPreview(scrub)) return {};
+                previewInputValid_=true;
+                stopScrubbing_=[scrub]{scrub->stop();};
+                return field->value()/field->singleStep();
+            };
+            scrub->updateValue=[this,scrub,field,setComponent](double adjustment){
+                const double bounded=std::clamp(adjustment,field->minimum()/field->singleStep(),
+                                                field->maximum()/field->singleStep());
+                const double candidate=std::round(bounded*field->singleStep()*1000.0)/1000.0;
+                previewField(scrub,[&](platz::Object& object){setComponent(object,candidate);});
+                if (previewEditor_==scrub) {
+                    const QSignalBlocker spinSignals(field);
+                    field->setValue(candidate);
+                }
+            };
+            scrub->finish=[this,scrub](bool commit){if (previewEditor_==scrub) finishPreview(commit);};
+            connect(field,&QDoubleSpinBox::valueChanged,this,[this,setComponent,field](double value){
+                if (previewEditor_!=field)
+                    applyEdit([&](platz::Object& object){setComponent(object,value);});
+                else if (previewInputValid_)
+                    previewField(field,[&](platz::Object& object){setComponent(object,value);});
             });
+            auto* editor=field->findChild<QLineEdit*>();
+            connect(editor,&QLineEdit::textEdited,this,[this,field,editor,setComponent](QString input){
+                auto cursor=editor->cursorPosition();
+                bool parsed=false;
+                const auto value=field->locale().toDouble(input,&parsed);
+                if (field->validate(input,cursor)!=QValidator::Acceptable || !parsed)
+                    previewField(field,{});
+                else
+                    previewField(field,[&](platz::Object& object){setComponent(object,value);});
+            });
+            connect(field,&QDoubleSpinBox::editingFinished,this,[this,field]{finishFieldPreview(field);});
         }
         box->addLayout(row);
     }
@@ -283,7 +389,10 @@ void StudioWindow::buildInspector() {
     slotControls->addWidget(resetSlot_);
     box->addLayout(slotControls);
     connect(materialSlot_,&QComboBox::currentIndexChanged,this,[this]{
-        if (!refreshing_ && project_ && !runtime_) syncMaterial(project_->find(selected_));
+        if (!refreshing_ && project_ && !runtime_) {
+            cancelPreview();
+            syncMaterial(project_->find(selected_));
+        }
     });
     connect(resetSlot_,&QPushButton::clicked,this,[this]{
         const auto slot=materialSlot_->currentIndex();
@@ -314,23 +423,20 @@ void StudioWindow::buildInspector() {
     material->addWidget(swatch_);
     material->addWidget(color_,1);
     box->addLayout(material);
-    auto setColor = [this](QColor value) {
-        if (!value.isValid()) { notify(tr("Enter a six-digit hex color, for example #89D6AE.")); syncInspector(); return; }
-        const auto slot=materialSlot_->currentIndex();
-        const std::array rgb{float(value.redF()),float(value.greenF()),float(value.blueF())};
-        applyEdit([slot,rgb](platz::Object& o){
-            if (o.asset.data && slot>=0) o.setSlotColor(slot,rgb);
-            else o.color={rgb[0],rgb[1],rgb[2]};
-        });
-    };
-    connect(color_,&QLineEdit::editingFinished,this,[this,setColor]{
-        if (!color_->isModified()) return;
-        const auto text = color_->text();
-        setColor(text.size()==7 && text.startsWith('#') ? QColor(text) : QColor());
+    connect(color_,&QLineEdit::textEdited,this,[this](const QString& text){
+        previewColor(color_,text.size()==7 && text.startsWith('#') ? QColor(text) : QColor());
     });
-    connect(swatch_,&QPushButton::clicked,this,[this,setColor]{
-        QColor value=QColorDialog::getColor(QColor(color_->text()),this,tr("Base color"),QColorDialog::DontUseNativeDialog);
-        if (value.isValid()) setColor(value);
+    connect(color_,&QLineEdit::editingFinished,this,[this]{finishFieldPreview(color_);});
+    connect(swatch_,&QPushButton::clicked,this,[this]{
+        if (!beginFieldPreview(swatch_)) return;
+        QColorDialog dialog(QColor(color_->text()),this);
+        dialog.setOption(QColorDialog::DontUseNativeDialog);
+        dialog.setWindowTitle(tr("Base color"));
+        connect(&dialog,&QColorDialog::currentColorChanged,this,[this](QColor color){previewColor(swatch_,color);});
+        if (dialog.exec()==QDialog::Accepted && previewEditor_==swatch_) {
+            previewColor(swatch_,dialog.selectedColor());
+            finishFieldPreview(swatch_);
+        } else if (previewEditor_==swatch_) finishPreview(false);
     });
     section(box,tr("SOURCE ID"));
     identity_=label({},"minor");

@@ -19,7 +19,7 @@ set(shader_compiler "${PROJECT_SOURCE_DIR}/tools/compile_shaders.py")
 add_custom_command(OUTPUT "${shader_header}"
     COMMAND "${Python3_EXECUTABLE}" "${shader_compiler}" "${CMAKE_CURRENT_SOURCE_DIR}/scene.slang"
         "${shader_header}" --compiler "${PLATZ_SLANG}" --validator "${PLATZ_VALIDATOR}"
-    DEPENDS scene.slang color.slangh "${shader_compiler}" "${PLATZ_SLANG}" "${PLATZ_VALIDATOR}"
+    DEPENDS scene.slang color.slangh overlay.slang "${shader_compiler}" "${PLATZ_SLANG}" "${PLATZ_VALIDATOR}"
     COMMENT "Compile, reflect and validate Vulkan 1.4 scene shaders" VERBATIM)
 
 add_library(platz_engine STATIC renderer.cpp vulkan_device.cpp "${shader_header}")
