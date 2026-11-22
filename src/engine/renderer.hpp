@@ -5,6 +5,7 @@
 #include <array>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
@@ -48,19 +49,27 @@ struct Capture {
 struct OverlayVertex {
     std::array<float,2> position; // Clip-space position, with positive Y up.
     Vec3 color;                  // SDR display color.
+    float depth{};               // Vulkan depth, near 0 to far 1.
+    float opacity{1.f};
 };
+
+enum class Presentation { Fifo, Interactive };
 
 class Renderer {
   public:
+    static constexpr std::uint64_t defaultViewportBytes = 512ull << 20;
     explicit Renderer(
         void* nativeWindow,
-        std::uint64_t maxViewportBytes = 512ull << 20); // Windows HWND; throws std::runtime_error on failure.
+        std::uint64_t maxViewportBytes = defaultViewportBytes,
+        Presentation presentation = Presentation::Fifo); // Windows HWND; throws on failure.
     ~Renderer();
     Renderer(const Renderer&) = delete;
     Renderer& operator=(const Renderer&) = delete;
     void resize(unsigned width, unsigned height);
-    void draw(std::span<const DrawObject> objects, const Camera& camera, std::uint32_t selected = 0,
-              std::span<const OverlayVertex> overlay = {});
+    bool draw(std::span<const DrawObject> objects, const Camera& camera, std::uint32_t selected = 0,
+              std::span<const OverlayVertex> overlay = {}, bool waitForFrame = true);
+    bool requestPick(int x, int y); // Queues one read from the last submitted frame; false when busy or out of bounds.
+    std::optional<std::uint32_t> pollPick(); // Includes token 0 for a completed background hit.
     std::uint32_t pick(int x, int y); // Physical client coordinates of the last frame.
     Capture capture();                // Explicit synchronous readback of the last frame.
     const std::string& adapter() const;

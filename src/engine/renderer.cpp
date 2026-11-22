@@ -269,11 +269,15 @@ struct Renderer::Impl {
     VkDescriptorSetLayout textureLayout{};
     VkDescriptorPool descriptors{};
     VkPipelineLayout layout{};
-    VkPipeline pipeline{}, ground{}, overlayPipeline{};
+    VkPipeline pipeline{}, ground{}, overlayPipeline{}, occludedOverlay{};
     VkCommandPool transferPool{};
     VkCommandBuffer transferCmd{};
     VkFence transferFence{};
-    Buffer geometry, readback;
+    VkCommandPool pickPool{};
+    VkCommandBuffer pickCmd{};
+    VkFence pickFence{};
+    bool pickPending{};
+    Buffer geometry, readback, pickReadback;
     Buffer pendingGeometry, geometryStaging;
     Buffer textureStaging;
     std::unique_ptr<TextureBatch> textures, pendingTextures;
@@ -284,6 +288,9 @@ struct Renderer::Impl {
     std::vector<PresentImage> images;
     VkExtent2D extent{}, requested{};
     VkFormat format{};
+    Presentation presentation{Presentation::Fifo};
+    VkPresentModeKHR presentMode{VK_PRESENT_MODE_FIFO_KHR};
+    uint32_t activeFrames{framesInFlight};
     bool pendingResize{}, drawn{};
     double cpuMs{}, gpuMs{}, pipelineMs{};
     VkDeviceSize attachmentBytes{}, peakAttachmentBytes{}, maxViewportBytes{};
@@ -296,7 +303,7 @@ struct Renderer::Impl {
     void finishTransfer();
     void prepare(Frame&, std::span<const SceneDraw>, const Camera&, uint32_t);
     void record(Frame&, std::span<const SceneDraw>, uint32_t);
-    void draw(std::span<const DrawObject>, const Camera&, uint32_t, std::span<const OverlayVertex>);
+    bool draw(std::span<const DrawObject>, const Camera&, uint32_t, std::span<const OverlayVertex>, bool);
     Capture read(uint32_t, uint32_t, uint32_t, uint32_t, bool);
     ~Impl();
 };
@@ -331,6 +338,9 @@ void Renderer::Impl::open(HWND hwnd) {
     VkPipelineLayoutCreateInfo lc{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
     lc.setLayoutCount = static_cast<uint32_t>(layouts.size());
     lc.pSetLayouts = layouts.data();
+    const VkPushConstantRange overlayStyle{VK_SHADER_STAGE_FRAGMENT_BIT,0,sizeof(float)};
+    lc.pushConstantRangeCount=1;
+    lc.pPushConstantRanges=&overlayStyle;
     check(vkCreatePipelineLayout(d.device, &lc, nullptr, &layout), "Creating material parameter layout");
     VkDescriptorPoolSize size{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, framesInFlight};
     VkDescriptorPoolCreateInfo dc{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
@@ -355,6 +365,8 @@ void Renderer::Impl::open(HWND hwnd) {
         }
     }
     makeCommands(d, transferPool, transferCmd, transferFence);
+    makeCommands(d, pickPool, pickCmd, pickFence);
+    pickReadback=d.buffer(sizeof(uint32_t),VK_BUFFER_USAGE_TRANSFER_DST_BIT,MemoryIntent::Readback,"Selection pixel");
     upload({});
     RECT rect{};
     GetClientRect(hwnd, &rect);
@@ -381,12 +393,18 @@ Renderer::Impl::~Impl() {
         vkDestroyFence(d.device, transferFence, nullptr);
     if (transferPool)
         vkDestroyCommandPool(d.device, transferPool, nullptr);
+    if (pickFence)
+        vkDestroyFence(d.device,pickFence,nullptr);
+    if (pickPool)
+        vkDestroyCommandPool(d.device,pickPool,nullptr);
     if (pipeline)
         vkDestroyPipeline(d.device, pipeline, nullptr);
     if (ground)
         vkDestroyPipeline(d.device, ground, nullptr);
     if (overlayPipeline)
         vkDestroyPipeline(d.device, overlayPipeline, nullptr);
+    if (occludedOverlay)
+        vkDestroyPipeline(d.device,occludedOverlay,nullptr);
     if (layout)
         vkDestroyPipelineLayout(d.device, layout, nullptr);
     textures.reset();
@@ -398,15 +416,18 @@ Renderer::Impl::~Impl() {
     if (binding)
         vkDestroyDescriptorSetLayout(d.device, binding, nullptr);
 }
-void Renderer::Impl::finishTransfer() {
-    check(vkEndCommandBuffer(transferCmd), "Closing transfer commands");
+void submitTransfer(const Device& d,VkCommandBuffer commands,VkFence fence) {
+    check(vkEndCommandBuffer(commands), "Closing transfer commands");
     VkCommandBufferSubmitInfo cmd{VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO};
-    cmd.commandBuffer = transferCmd;
+    cmd.commandBuffer = commands;
     VkSubmitInfo2 submit{VK_STRUCTURE_TYPE_SUBMIT_INFO_2};
     submit.commandBufferInfoCount = 1;
     submit.pCommandBufferInfos = &cmd;
-    check(vkResetFences(d.device, 1, &transferFence), "Resetting transfer completion");
-    check(vkQueueSubmit2(d.queue, 1, &submit, transferFence), "Submitting GPU transfer");
+    check(vkResetFences(d.device, 1, &fence), "Resetting transfer completion");
+    check(vkQueueSubmit2(d.queue, 1, &submit, fence), "Submitting GPU transfer");
+}
+void Renderer::Impl::finishTransfer() {
+    submitTransfer(d,transferCmd,transferFence);
     check(vkWaitForFences(d.device, 1, &transferFence, VK_TRUE, timeout), "Waiting for GPU transfer");
 }
 void Renderer::Impl::upload(const std::map<std::string,const platz::MeshAsset*>& assets) {
@@ -616,11 +637,22 @@ void Renderer::Impl::rebuild() {
         throw std::runtime_error("This display lacks a qualified 8-bit SDR presentation format.");
     const bool changed = format != compatible->format;
     format = compatible->format;
-    uint32_t imageCount = std::max(caps.minImageCount + 1, framesInFlight);
+    presentMode=VK_PRESENT_MODE_FIFO_KHR;
+    if (presentation==Presentation::Interactive) {
+        check(vkGetPhysicalDeviceSurfacePresentModesKHR(d.physical,d.surface,&count,nullptr),"Counting present modes");
+        std::vector<VkPresentModeKHR> modes(count);
+        check(vkGetPhysicalDeviceSurfacePresentModesKHR(d.physical,d.surface,&count,modes.data()),"Reading present modes");
+        if (std::ranges::find(modes,VK_PRESENT_MODE_MAILBOX_KHR)!=modes.end()) presentMode=VK_PRESENT_MODE_MAILBOX_KHR;
+    }
+    const bool fifoFallback=presentation==Presentation::Interactive && presentMode==VK_PRESENT_MODE_FIFO_KHR;
+    activeFrames=fifoFallback ? 1 : framesInFlight;
+    current=0;
+    uint32_t imageCount = fifoFallback ? caps.minImageCount : std::max(caps.minImageCount + 1, framesInFlight);
     if (caps.maxImageCount)
         imageCount = std::min(imageCount, caps.maxImageCount);
     const uint64_t pixels = uint64_t(extent.width) * extent.height;
-    if (pixels * (framesInFlight * 12ull + imageCount * 4ull) > std::min(d.viewportBudget(), maxViewportBytes))
+    const auto budget=std::min(d.viewportBudget(),maxViewportBytes);
+    if (pixels * (activeFrames * 12ull + imageCount * 4ull) > budget)
         throw std::runtime_error(
             "The viewport exceeds its graphics-memory budget. Reduce the window size or free GPU memory.");
     VkSwapchainCreateInfoKHR ci{VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR};
@@ -635,10 +667,12 @@ void Renderer::Impl::rebuild() {
     ci.preTransform = caps.currentTransform;
     ci.compositeAlpha = static_cast<VkCompositeAlphaFlagBitsKHR>(caps.supportedCompositeAlpha &
                                                                  (~caps.supportedCompositeAlpha + 1u));
-    ci.presentMode = VK_PRESENT_MODE_FIFO_KHR;
+    ci.presentMode = presentMode;
     ci.clipped = VK_TRUE;
-    check(vkCreateSwapchainKHR(d.device, &ci, nullptr, &chain), "Creating FIFO viewport swapchain");
+    check(vkCreateSwapchainKHR(d.device, &ci, nullptr, &chain), "Creating viewport swapchain");
     check(vkGetSwapchainImagesKHR(d.device, chain, &count, nullptr), "Counting presentation images");
+    if (pixels * (activeFrames * 12ull + count * 4ull) > budget)
+        throw std::runtime_error("The display's swapchain exceeds the viewport's graphics-memory budget.");
     std::vector<VkImage> native(count);
     check(vkGetSwapchainImagesKHR(d.device, chain, &count, native.data()), "Reading presentation images");
     images.resize(count);
@@ -648,14 +682,14 @@ void Renderer::Impl::rebuild() {
         check(vkCreateSemaphore(d.device, &sc, nullptr, &images[i].finished),
               "Creating per-image presentation semaphore");
     }
-    for (auto& f : frames) {
+    for (auto& f : std::span(frames).first(activeFrames)) {
         const auto usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
         f.color = d.image(extent, format, usage, VK_IMAGE_ASPECT_COLOR_BIT, "Viewport display color");
         f.ids = d.image(extent, idFormat, usage, VK_IMAGE_ASPECT_COLOR_BIT, "Scene identity attachment");
         f.depth = d.image(extent, depthFormat, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
                           VK_IMAGE_ASPECT_DEPTH_BIT, "Scene depth");
     }
-    attachmentBytes = pixels * framesInFlight * 12ull;
+    attachmentBytes = pixels * activeFrames * 12ull;
     peakAttachmentBytes = std::max(attachmentBytes, peakAttachmentBytes);
     if (changed || !pipeline)
         makePipelines();
@@ -669,6 +703,8 @@ void Renderer::Impl::makePipelines() {
         vkDestroyPipeline(d.device, std::exchange(ground, VK_NULL_HANDLE), nullptr);
     if (overlayPipeline)
         vkDestroyPipeline(d.device, std::exchange(overlayPipeline, VK_NULL_HANDLE), nullptr);
+    if (occludedOverlay)
+        vkDestroyPipeline(d.device,std::exchange(occludedOverlay,VK_NULL_HANDLE),nullptr);
     auto makeModule = [&](std::span<const uint32_t> code) {
         VkShaderModule module{};
         VkShaderModuleCreateInfo ci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
@@ -762,14 +798,24 @@ void Renderer::Impl::makePipelines() {
     stream.stride=sizeof(OverlayVertex);
     const VkVertexInputAttributeDescription overlayInputs[]={
         {0,0,VK_FORMAT_R32G32_SFLOAT,offsetof(OverlayVertex,position)},
-        {1,0,VK_FORMAT_R32G32B32_SFLOAT,offsetof(OverlayVertex,color)}};
+        {1,0,VK_FORMAT_R32G32B32_SFLOAT,offsetof(OverlayVertex,color)},
+        {2,0,VK_FORMAT_R32G32_SFLOAT,offsetof(OverlayVertex,depth)}};
+    static_assert(offsetof(OverlayVertex,opacity)==offsetof(OverlayVertex,depth)+sizeof(float));
     vertex.vertexAttributeDescriptionCount=static_cast<uint32_t>(std::size(overlayInputs));
     vertex.pVertexAttributeDescriptions=overlayInputs;
     rendering.colorAttachmentCount=1;
-    rendering.depthAttachmentFormat=VK_FORMAT_UNDEFINED;
     blend.attachmentCount=1;
-    ci.pDepthStencilState=nullptr;
+    output[0].blendEnable=VK_TRUE;
+    output[0].srcColorBlendFactor=VK_BLEND_FACTOR_SRC_ALPHA;
+    output[0].dstColorBlendFactor=VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    output[0].colorBlendOp=VK_BLEND_OP_ADD;
+    output[0].srcAlphaBlendFactor=VK_BLEND_FACTOR_ONE;
+    output[0].dstAlphaBlendFactor=VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    output[0].alphaBlendOp=VK_BLEND_OP_ADD;
+    depthTest.depthCompareOp=VK_COMPARE_OP_LESS_OR_EQUAL;
     check(vkCreateGraphicsPipelines(d.device,{},1,&ci,nullptr,&overlayPipeline),"Creating viewport overlay");
+    depthTest.depthCompareOp=VK_COMPARE_OP_GREATER;
+    check(vkCreateGraphicsPipelines(d.device,{},1,&ci,nullptr,&occludedOverlay),"Creating occluded overlay");
     d.label(VK_OBJECT_TYPE_PIPELINE, reinterpret_cast<uint64_t>(pipeline), "Opaque meshes and identity");
     pipelineMs = std::chrono::duration<double, std::milli>(Clock::now() - begin).count();
 }
@@ -874,7 +920,7 @@ void Renderer::Impl::record(Frame& f, std::span<const SceneDraw> draws, uint32_t
     colors[0].clearValue.color = {{.100f, .126f, .155f, 1.f}};
     auto dep = attachment(f.depth.view, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
     dep.clearValue.depthStencil = {1, 0};
-    dep.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    dep.storeOp = f.overlayCount ? VK_ATTACHMENT_STORE_OP_STORE : VK_ATTACHMENT_STORE_OP_DONT_CARE;
     VkRenderingInfo render{VK_STRUCTURE_TYPE_RENDERING_INFO};
     render.renderArea = {{0, 0}, extent};
     render.layerCount = 1;
@@ -908,18 +954,25 @@ void Renderer::Impl::record(Frame& f, std::span<const SceneDraw> draws, uint32_t
         submit(i+1,draws[i].range,draws[i].texture);
     vkCmdEndRendering(cmd);
     if (f.overlayCount) {
-        // The overlay loads only SDR color. Scene depth and picking are separate attachments.
+        // Preserve scene IDs while drawing visible and occluded handles against scene depth.
         imageBarrier(cmd,f.color.handle,f.color.aspect,VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
             VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
             VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
             VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT|VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
         colors[0].loadOp=VK_ATTACHMENT_LOAD_OP_LOAD;
+        imageBarrier(cmd,f.depth.handle,f.depth.aspect,VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+            VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,tests,VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+            tests,VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT|VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
+        dep.loadOp=VK_ATTACHMENT_LOAD_OP_LOAD;
+        dep.storeOp=VK_ATTACHMENT_STORE_OP_DONT_CARE;
         render.colorAttachmentCount=1;
-        render.pDepthAttachment=nullptr;
         vkCmdBeginRendering(cmd,&render);
-        vkCmdBindPipeline(cmd,VK_PIPELINE_BIND_POINT_GRAPHICS,overlayPipeline);
         vkCmdBindVertexBuffers(cmd,0,1,&f.overlayVertices.handle,&zero);
-        vkCmdDraw(cmd,f.overlayCount,1,0,0);
+        for (const auto [pass,opacity] : {std::pair{occludedOverlay,.3f},std::pair{overlayPipeline,1.f}}) {
+            vkCmdBindPipeline(cmd,VK_PIPELINE_BIND_POINT_GRAPHICS,pass);
+            vkCmdPushConstants(cmd,layout,VK_SHADER_STAGE_FRAGMENT_BIT,0,sizeof(opacity),&opacity);
+            vkCmdDraw(cmd,f.overlayCount,1,0,0);
+        }
         vkCmdEndRendering(cmd);
     }
     for (auto* image : {&f.color, &f.ids})
@@ -943,13 +996,18 @@ void Renderer::Impl::record(Frame& f, std::span<const SceneDraw> draws, uint32_t
         vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT, f.timing, 1);
     check(vkEndCommandBuffer(cmd), "Closing viewport commands");
 }
-void Renderer::Impl::draw(std::span<const DrawObject> objects, const Camera& camera, uint32_t selected,
-                          std::span<const OverlayVertex> overlay) {
+bool Renderer::Impl::draw(std::span<const DrawObject> objects, const Camera& camera, uint32_t selected,
+                          std::span<const OverlayVertex> overlay, bool waitForFrame) {
     auto begin = Clock::now();
     if (pendingResize)
         rebuild();
     if (!chain)
-        return;
+        return false;
+    auto& f = frames[current];
+    const auto available=waitForFrame ? vkWaitForFences(d.device,1,&f.fence,VK_TRUE,timeout) :
+                                       vkGetFenceStatus(d.device,f.fence);
+    if (!waitForFrame && available==VK_NOT_READY) return false;
+    check(available,"Reusing completed frame");
     std::map<std::string,const platz::MeshAsset*> assets;
     for(const auto& object:objects) if(object.asset) assets.try_emplace(object.asset->digest(),object.asset.get());
     if(assets.size()!=imported.size() || !std::equal(assets.begin(),assets.end(),imported.begin(),
@@ -979,8 +1037,6 @@ void Renderer::Impl::draw(std::span<const DrawObject> objects, const Camera& cam
             draws.push_back({&object,ranges[kind],object.color,textures->white.set});
         }
     }
-    auto& f = frames[current];
-    check(vkWaitForFences(d.device, 1, &f.fence, VK_TRUE, timeout), "Reusing completed frame");
     if (f.rendered && f.timing) {
         uint64_t times[2]{};
         check(vkGetQueryPoolResults(d.device, f.timing, 0, 2, sizeof(times), times, sizeof(uint64_t),
@@ -990,23 +1046,26 @@ void Renderer::Impl::draw(std::span<const DrawObject> objects, const Camera& cam
         gpuMs = double((times[1] - times[0]) & mask) * d.properties.limits.timestampPeriod / 1e6;
     }
     vmaSetCurrentFrameIndex(d.allocator, ++frameNumber);
-    if (overlay.size()>8192 || overlay.size()%3)
+    if (overlay.size()>UINT32_MAX || overlay.size()%3 || overlay.size_bytes()>maxViewportBytes/activeFrames)
         throw std::runtime_error("Viewport overlay has an invalid triangle count.");
     f.overlayCount=static_cast<uint32_t>(overlay.size());
     if (!overlay.empty()) {
         const auto bytes=overlay.size_bytes();
         if (f.overlayVertices.size<bytes)
-            f.overlayVertices=d.buffer(bytes,VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,MemoryIntent::Upload,"Gizmo vertices");
+            f.overlayVertices=d.buffer(std::max<uint64_t>(bytes,std::min(f.overlayVertices.size*2,maxViewportBytes/activeFrames)),
+                                       VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                                       MemoryIntent::Upload,"Gizmo vertices");
         std::memcpy(f.overlayVertices.mapped,overlay.data(),bytes);
         check(vmaFlushAllocation(d.allocator,f.overlayVertices.allocation,0,bytes),"Flushing viewport overlay");
     }
     prepare(f, draws, camera, selected);
     uint32_t idx{};
-    VkResult acquired = vkAcquireNextImageKHR(d.device, chain, timeout, f.acquired, {}, &idx);
+    VkResult acquired = vkAcquireNextImageKHR(d.device, chain, waitForFrame ? timeout : 0, f.acquired, {}, &idx);
+    if (!waitForFrame && (acquired==VK_NOT_READY || acquired==VK_TIMEOUT)) return false;
     if (acquired == VK_ERROR_OUT_OF_DATE_KHR) {
         pendingResize = true;
         drawn = false;
-        return;
+        return false;
     }
     if (acquired != VK_SUBOPTIMAL_KHR)
         check(acquired, "Acquiring display image");
@@ -1040,11 +1099,12 @@ void Renderer::Impl::draw(std::span<const DrawObject> objects, const Camera& cam
         check(result, "Presenting scene");
     f.rendered = true;
     last = current;
-    current = (current + 1) % framesInFlight;
+    current = (current + 1) % activeFrames;
     drawn = result != VK_ERROR_OUT_OF_DATE_KHR;
     cpuMs = std::chrono::duration<double, std::milli>(Clock::now() - begin).count();
     if (d.errors.load())
         throw std::runtime_error("Vulkan validation reported an error. See the validation log.");
+    return drawn;
 }
 
 Capture Renderer::Impl::read(uint32_t x, uint32_t y, uint32_t w, uint32_t h, bool withColor) {
@@ -1085,8 +1145,9 @@ Capture Renderer::Impl::read(uint32_t x, uint32_t y, uint32_t w, uint32_t h, boo
     }
     return result;
 }
-Renderer::Renderer(void* window, uint64_t maxViewportBytes) : impl_(std::make_unique<Impl>()) {
+Renderer::Renderer(void* window,uint64_t maxViewportBytes,Presentation presentation) : impl_(std::make_unique<Impl>()) {
     impl_->maxViewportBytes = maxViewportBytes;
+    impl_->presentation = presentation;
     impl_->open(static_cast<HWND>(window));
 }
 Renderer::~Renderer() = default;
@@ -1097,9 +1158,38 @@ void Renderer::resize(unsigned w, unsigned h) {
         impl_->drawn = false;
     }
 }
-void Renderer::draw(std::span<const DrawObject> objects, const Camera& c, uint32_t selected,
-                    std::span<const OverlayVertex> overlay) {
-    impl_->draw(objects, c, selected, overlay);
+bool Renderer::draw(std::span<const DrawObject> objects, const Camera& c, uint32_t selected,
+                    std::span<const OverlayVertex> overlay,bool waitForFrame) {
+    return impl_->draw(objects,c,selected,overlay,waitForFrame);
+}
+bool Renderer::requestPick(int x,int y) {
+    auto& i=*impl_;
+    if (i.pickPending || !i.drawn || x<0 || y<0 || static_cast<unsigned>(x)>=i.extent.width ||
+        static_cast<unsigned>(y)>=i.extent.height) return false;
+    startCommands(i.d.device,i.pickPool,i.pickCmd);
+    VkBufferImageCopy region{};
+    region.imageSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};
+    region.imageOffset={x,y,0};
+    region.imageExtent={1,1,1};
+    // On the graphics queue, the frame's final barrier publishes the ID attachment to this copy.
+    // The next use of that attachment in turn waits for transfer reads before writing.
+    vkCmdCopyImageToBuffer(i.pickCmd,i.frames[i.last].ids.handle,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           i.pickReadback.handle,1,&region);
+    submitTransfer(i.d,i.pickCmd,i.pickFence);
+    i.pickPending=true;
+    return true;
+}
+std::optional<uint32_t> Renderer::pollPick() {
+    auto& i=*impl_;
+    if (!i.pickPending) return {};
+    const auto status=vkGetFenceStatus(i.d.device,i.pickFence);
+    if (status==VK_NOT_READY) return {};
+    check(status,"Checking selection readback");
+    check(vmaInvalidateAllocation(i.d.allocator,i.pickReadback.allocation,0,sizeof(uint32_t)),"Reading selection pixel");
+    uint32_t token{};
+    std::memcpy(&token,i.pickReadback.mapped,sizeof(token));
+    i.pickPending=false;
+    return token;
 }
 uint32_t Renderer::pick(int x, int y) {
     if (!impl_->drawn || x < 0 || y < 0 || static_cast<unsigned>(x) >= impl_->extent.width ||
@@ -1128,8 +1218,9 @@ unsigned Renderer::textureWarnings() const {
 std::string Renderer::diagnostics() const {
     std::ostringstream s;
     s << impl_->d.report() << " | " << impl_->extent.width << "x" << impl_->extent.height << " | "
-      << (impl_->format == VK_FORMAT_B8G8R8A8_UNORM ? "BGRA8" : "RGBA8") << " SDR, D32, R32_UINT, FIFO, "
-      << impl_->images.size() << " images"
+      << (impl_->format == VK_FORMAT_B8G8R8A8_UNORM ? "BGRA8" : "RGBA8") << " SDR, D32, R32_UINT, "
+      << (impl_->presentMode==VK_PRESENT_MODE_MAILBOX_KHR ? "MAILBOX" : "FIFO") << ", "
+      << impl_->images.size() << " images, " << impl_->activeFrames << " frame slots"
       << " | attachment bytes " << impl_->attachmentBytes << ", peak " << impl_->peakAttachmentBytes
       << ", readback capacity " << impl_->readback.size << " | last CPU submit/present " << impl_->cpuMs
       << " ms, last completed GPU frame " << impl_->gpuMs << " ms, pipeline creation " << impl_->pipelineMs

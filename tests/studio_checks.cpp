@@ -13,6 +13,7 @@
 #include <QInputMethodEvent>
 #include <QMenu>
 #include <QDoubleSpinBox>
+#include <QEventLoop>
 #include <QFile>
 #include <QFileDialog>
 #include <QInputDialog>
@@ -21,6 +22,7 @@
 #include <QLineEdit>
 #include <QListWidget>
 #include <QMouseEvent>
+#include <QMessageBox>
 #include <QPushButton>
 #include <QSettings>
 #include <QScreen>
@@ -38,6 +40,11 @@
 #include <iostream>
 #include <numbers>
 #include <stdexcept>
+#include <thread>
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
 
 namespace {
 using platz::engine::Capture;
@@ -88,8 +95,206 @@ void expose(StudioWindow& window) {
     check(QTest::qWaitForWindowExposed(&window), "Studio did not expose a native window");
 }
 
-void chooseFile(const QString& path, const std::function<void()>& action) {
+void clickViewport(Viewport* viewport,QPoint point) {
+    QTest::mouseClick(viewport,Qt::LeftButton,{},point);
+    check(QTest::qWaitFor([&]{return !viewport->selectionPending();},1000),"Viewport selection did not finish");
+}
+
+class StudioTestApplication : public QApplication {
+public:
+    using QApplication::QApplication;
+    using Clock = std::chrono::steady_clock;
+
+    Viewport* viewport{};
+    QWidget* inspector{};
+    unsigned inspectorPaints{}, submissions{};
+    std::vector<double> moves, paints, latency;
+
+    bool notify(QObject* receiver, QEvent* event) override {
+        if (!viewport) return QApplication::notify(receiver,event);
+        if (event->type()==QEvent::Paint) {
+            if (auto* widget=qobject_cast<QWidget*>(receiver);
+                widget && (widget==inspector || inspector->isAncestorOf(widget))) ++inspectorPaints;
+        }
+        if (receiver!=viewport) return QApplication::notify(receiver,event);
+        const auto start=Clock::now();
+        if (event->type()==QEvent::MouseMove) {
+            if (!pendingInput_) pendingInput_=start;
+            const auto delivered=QApplication::notify(receiver,event);
+            moves.push_back(milliseconds(Clock::now()-start));
+            return delivered;
+        }
+        if (event->type()!=QEvent::Paint) return QApplication::notify(receiver,event);
+        const auto serial=viewport->submittedFrames();
+        const auto delivered=QApplication::notify(receiver,event);
+        const auto end=Clock::now();
+        paints.push_back(milliseconds(end-start));
+        const bool submitted=viewport->submittedFrames()!=serial;
+        if (submitted) ++submissions;
+        if (submitted && pendingInput_) {
+            latency.push_back(milliseconds(end-*pendingInput_));
+            pendingInput_.reset();
+        }
+        return delivered;
+    }
+
+    void reset() {
+        moves.clear(); paints.clear(); latency.clear();
+        inspectorPaints=submissions=0;
+        pendingInput_.reset();
+    }
+
+private:
+    static double milliseconds(Clock::duration duration) {
+        return std::chrono::duration<double,std::milli>(duration).count();
+    }
+    std::optional<Clock::time_point> pendingInput_;
+};
+
+void profileViewportDrag(StudioTestApplication& app,QTemporaryDir& dir,bool dense,bool scaledScene,bool gates) {
+    using Clock=StudioTestApplication::Clock;
+    const auto path=dir.filePath("Drag profile.platz");
+    check(QFile::copy(QString::fromUtf8(PLATZ_VALIDATION_PATH),path),"Cannot copy the drag profile project");
+    if (scaledScene) {
+        auto project=platz::Project::open(path.toStdWString());
+        const auto silver=std::ranges::find(project.objects(),"Silver block",&platz::Object::name);
+        check(silver!=project.objects().end(),"Missing scaling test source object");
+        project.repeat(silver->id,project.revision(),512-static_cast<unsigned>(project.objects().size()),{2,0,0});
+        project.save();
+    }
+    StudioWindow window;
+    expose(window);
+    const auto opened=window.openProject(path);
+    check(opened,"Could not open drag profile copy");
+    auto* view=static_cast<Viewport*>(control<QWidget>(window,"viewport"));
+    auto* tree=control<QListWidget>(window,"sceneTree");
+    std::cout << "Scene objects " << tree->count() << '\n';
+    for (int row=0;row<tree->count();++row)
+        if (tree->item(row)->text()=="Silver block") tree->setCurrentRow(row);
+    QTest::keyClick(view,Qt::Key_2);
+    const auto summary=[](const char* label,std::vector<double> values) {
+        check(!values.empty(),"Drag profile did not collect a required timing sample");
+        std::ranges::sort(values);
+        const auto percentile=[&](double p) {return values[static_cast<size_t>(std::ceil(p*values.size()))-1];};
+        std::cout << label << " ms p50/p95/p99/max " << percentile(.5) << '/' << percentile(.95)
+                  << '/' << percentile(.99) << '/' << values.back() << '\n';
+        return percentile(.95);
+    };
+    for (const QSize size : {QSize(1440,900),QSize(2560,1300)}) {
+        window.resize(size);
+        settledFrame(*view);
+        const auto axis=view->manipulatorPaths().axes[0];
+        check(axis.size()==2,"Drag profile requires a selected Move X handle");
+        const QPointF from=axis[0].pixel*.25+axis[1].pixel*.75;
+        const QPointF direction=(axis[1].pixel-axis[0].pixel)*.45;
+        for (const int rate : {500,1000}) {
+            QTest::mousePress(view,Qt::LeftButton,{},from.toPoint());
+            check(view->dragging(),"Drag profile did not capture the transform handle");
+            app.reset();
+            app.viewport=view;
+            app.inspector=control<QDoubleSpinBox>(window,"positionX")->parentWidget();
+            while (app.inspector->parentWidget() && !qobject_cast<QDockWidget*>(app.inspector))
+                app.inspector=app.inspector->parentWidget();
+            const auto hwnd=reinterpret_cast<HWND>(view->winId());
+            const auto dpr=view->devicePixelRatioF();
+            unsigned posted=0;
+            {
+                std::jthread producer([=,&posted] {
+                    const auto begin=Clock::now();
+                    for (int i=0;i<rate;++i) {
+                        std::this_thread::sleep_until(begin+std::chrono::microseconds(i*1000000/rate));
+                        auto at=(from+direction*std::sin(i*12./rate))*dpr;
+                        // Distinct consecutive positions exercise Qt's native event path even at 1 kHz.
+                        if (dense) at.ry()+=i%2 ? 2 : -2;
+                        if (PostMessageW(hwnd,WM_MOUSEMOVE,MK_LBUTTON,MAKELPARAM(qRound(at.x()),qRound(at.y())))) ++posted;
+                    }
+                });
+                QEventLoop stream;
+                QTimer::singleShot(1075,Qt::PreciseTimer,&stream,&QEventLoop::quit);
+                stream.exec();
+            }
+            app.viewport=nullptr;
+            check(view->dragging(),"Native move stream lost the drag");
+            QTest::keyClick(view,Qt::Key_Escape);
+            QTest::mouseRelease(view,Qt::LeftButton,{},from.toPoint());
+            check(posted==unsigned(rate) && app.moves.size()>=100 && app.latency.size()>=30,
+                  "Visible drag profile received insufficient native input");
+            std::cout << "Visible " << view->width() << 'x' << view->height() << " at " << view->screen()->refreshRate()
+                      << " Hz, posted " << posted << " moves/s, Qt delivered " << app.moves.size()
+                      << ", paints " << app.paints.size() << ", submissions " << app.submissions
+                      << ", Inspector paints " << app.inspectorPaints << '\n';
+            const auto dispatch=summary("Mouse dispatch",app.moves);
+            summary("Viewport paint",app.paints);
+            const auto latency=summary("Oldest move to submitted paint end",app.latency);
+            if (gates) {
+                check(app.inspectorPaints<=2*app.submissions,"Inspector exceeded two widget paints per submitted frame");
+                const auto report=view->diagnostics();
+                if (view->screen()->refreshRate()>239 && report.contains("RTX 5080") && report.contains("MAILBOX")) {
+                    check(latency<4.2,"Visible drag exceeded 4.2 ms p95 input-to-submitted-paint budget");
+                    check(dispatch<.15,"Visible drag exceeded 0.15 ms p95 mouse dispatch budget");
+                }
+            }
+        }
+    }
+    QTest::keyClick(view,Qt::Key_1);
+    const auto frame=settledFrame(*view);
+    const auto silver=tree->currentRow();
+    const auto hit=visiblePoint(frame,silver+1,*view);
+    const auto empty=visiblePoint(frame,0,*view);
+    std::vector<double> clickDispatch, clickResult;
+    for (int i=0;i<100;++i) {
+        const auto point=i%2==0 ? empty : hit;
+        QMouseEvent press(QEvent::MouseButtonPress,point,view->mapToGlobal(point),Qt::LeftButton,Qt::LeftButton,{});
+        const auto start=Clock::now();
+        QApplication::sendEvent(view,&press);
+        clickDispatch.push_back(std::chrono::duration<double,std::milli>(Clock::now()-start).count());
+        while (view->selectionPending() && Clock::now()-start<std::chrono::milliseconds(100))
+            QApplication::processEvents();
+        check(!view->selectionPending() && tree->currentRow()==(i%2==0 ? -1 : silver),"Visible click selected the wrong ID");
+        clickResult.push_back(std::chrono::duration<double,std::milli>(Clock::now()-start).count());
+    }
+    const auto dispatch=summary("Click dispatch (100 selected/background hits)",clickDispatch);
+    summary("Click to Studio selection",clickResult);
+    if (gates && view->diagnostics().contains("RTX 5080")) check(dispatch<1.,"Click dispatch exceeded 1 ms p95");
+    std::cout << view->diagnostics().toStdString() << '\n';
+}
+
+void captureTransformEvidence(QTemporaryDir& dir,const QString& destination) {
+    const auto path=dir.filePath("Transform evidence.platz");
+    check(QFile::copy(QString::fromUtf8(PLATZ_VALIDATION_PATH),path),"Cannot copy project for screenshot capture");
+    StudioWindow window;
+    expose(window);
+    check(window.openProject(path),"Cannot open screenshot project");
+    auto* view=static_cast<Viewport*>(control<QWidget>(window,"viewport"));
+    auto* tree=control<QListWidget>(window,"sceneTree");
+    for (int row=0;row<tree->count();++row)
+        if (tree->item(row)->text()=="Silver block") tree->setCurrentRow(row);
+    check(QDir().mkpath(destination),"Cannot create screenshot directory");
+    const std::array keys{Qt::Key_2,Qt::Key_3,Qt::Key_4};
+    const std::array names{"move","rotate","scale"};
+    for (size_t i=0;i<keys.size();++i) {
+        QTest::keyClick(view,keys[i]);
+        settledFrame(*view);
+        QTest::qWait(100);
+        const auto screenshot=view->screen()->grabWindow(window.winId());
+        const auto filename=QString("%1-%2.png").arg(names[i]).arg(qRound(view->devicePixelRatioF()*100));
+        check(!screenshot.isNull() && screenshot.save(QDir(destination).filePath(filename)),"Cannot save Studio screenshot");
+    }
+}
+
+void chooseFile(const QString& path, const std::function<void()>& action,
+                QMessageBox::StandardButton overwrite=QMessageBox::NoButton) {
     bool answered = false;
+    bool confirmed = false;
+    QTimer confirmation;
+    QObject::connect(&confirmation,&QTimer::timeout,[&]{
+        auto* prompt=qobject_cast<QMessageBox*>(QApplication::activeModalWidget());
+        if (!prompt) return;
+        confirmation.stop();
+        auto* choice=prompt->button(overwrite);
+        confirmed=choice!=nullptr;
+        if (choice) choice->click(); else prompt->reject();
+    });
     QTimer observer;
     QObject::connect(&observer, &QTimer::timeout, [&] {
         auto* dialog = qobject_cast<QFileDialog*>(QApplication::activeModalWidget());
@@ -103,9 +308,11 @@ void chooseFile(const QString& path, const std::function<void()>& action) {
         if (dialog->isVisible()) dialog->reject();
     });
     observer.start(25);
+    if (overwrite!=QMessageBox::NoButton) confirmation.start(25);
     action();
     QApplication::processEvents();
     check(answered, "Studio project button did not open its file chooser");
+    check(overwrite==QMessageBox::NoButton || confirmed,"Existing file did not trigger overwrite confirmation");
 }
 void fileAction(StudioWindow& window, Qt::Key shortcut, const QString& path) {
     chooseFile(path,[&]{
@@ -132,10 +339,10 @@ void exerciseImport(QTemporaryDir& dir) {
         vp->setFocus(); QTest::keyClick(vp,Qt::Key_F);
         expected=settledFrame(*vp);
         auto point=visiblePoint(expected,5,*vp);
-        QTest::mouseClick(vp,Qt::LeftButton,{},point);
+        clickViewport(vp,point);
         check(control<QLineEdit>(window,"objectName")->text()=="Spire","GPU pick missed the imported mesh");
         auto* play=control<QPushButton>(window,"playButton");
-        QTest::mouseClick(play,Qt::LeftButton); QTest::mouseClick(vp,Qt::LeftButton,{},point);
+        QTest::mouseClick(play,Qt::LeftButton); clickViewport(vp,point);
         check(settledFrame(*vp).tokens!=expected.tokens,"Imported mesh did not turn during Play");
         QTest::mouseClick(play,Qt::LeftButton);
         check(settledFrame(*vp).rgba==expected.rgba,"Stop failed to restore imported geometry");
@@ -164,11 +371,15 @@ void exerciseImport(QTemporaryDir& dir) {
         QFile marker(occupied);
         check(marker.open(QIODevice::WriteOnly) && marker.write("keep")==4,"Could not prepare an occupied export path");
         marker.close();
-        chooseFile(occupied,[&]{QTest::mouseClick(exportButton,Qt::LeftButton);});
+        chooseFile(occupied,[&]{QTest::mouseClick(exportButton,Qt::LeftButton);},QMessageBox::No);
         check(marker.open(QIODevice::ReadOnly) && marker.readAll()=="keep","Export replaced an existing file");
+        marker.close();
+        chooseFile(occupied,[&]{QTest::mouseClick(exportButton,Qt::LeftButton);},QMessageBox::Yes);
+        check(marker.open(QIODevice::ReadOnly) && original.seek(0) && marker.readAll()==original.readAll(),
+              "Approved overwrite did not replace the GLB with the original bytes");
         check(window.close(),"Saving source bytes made an unrelated project edit");
     }
-    std::cout<<"GLB import, Vulkan pick, isolated Play, pixel-identical reopen and byte-exact no-clobber extraction passed\n";
+    std::cout<<"GLB import, Vulkan pick, isolated Play, pixel-identical reopen and confirmed byte-exact overwrite passed\n";
 }
 void exerciseAssetLibrary(QTemporaryDir& dir) {
     const auto file=dir.filePath("Asset library.platz");
@@ -231,7 +442,7 @@ void exerciseAssetLibrary(QTemporaryDir& dir) {
         check(!place->isEnabled() && !assign->isEnabled() && !replace->isEnabled(),
               "Assets dock left authoring actions enabled during Play");
         const auto point=visiblePoint(settledFrame(*viewport),5,*viewport);
-        QTest::mouseClick(viewport,Qt::LeftButton,{},point);
+        clickViewport(viewport,point);
         check(settledFrame(*viewport).tokens!=expectedFrame.tokens,"Replaced mesh did not interact in Play");
         QTest::mouseClick(play,Qt::LeftButton);
         check(settledFrame(*viewport).rgba==expectedFrame.rgba,"Play altered the authored mesh after Stop");
@@ -299,7 +510,7 @@ void exerciseMaterialSlots(QTemporaryDir& dir) {
         QTest::mouseClick(play,Qt::LeftButton);
         check(!materials->isEnabled(),"Material authoring remained active during Play.");
         const auto point=visiblePoint(settledFrame(*viewport),5,*viewport);
-        QTest::mouseClick(viewport,Qt::LeftButton,{},point);
+        clickViewport(viewport,point);
         check(settledFrame(*viewport).tokens!=painted.tokens,"Play did not turn the multi-primitive object.");
         QTest::mouseClick(play,Qt::LeftButton);
         check(settledFrame(*viewport).rgba==painted.rgba,"Play changed authoring material or transforms.");
@@ -362,7 +573,7 @@ void exerciseTextures(QTemporaryDir& dir) {
         QTest::mouseClick(play,Qt::LeftButton);
         check(!toggle->isEnabled(),"Texture authoring remained active in Play.");
         const auto point=visiblePoint(settledFrame(*viewport),5,*viewport);
-        QTest::mouseClick(viewport,Qt::LeftButton,{},point);
+        clickViewport(viewport,point);
         check(settledFrame(*viewport).tokens!=saved.tokens,"Play did not rotate the textured object.");
         QTest::mouseClick(play,Qt::LeftButton);
         check(settledFrame(*viewport).rgba==saved.rgba,"Play altered authored texture state.");
@@ -405,7 +616,7 @@ void exerciseViewportTransforms(QTemporaryDir& dir, bool scaled) {
     const auto original=platz::Project::open(file);
     const auto& object=original.objects().at(3);
     const auto originalFrame=settledFrame(*viewport);
-    QTest::mouseClick(viewport,Qt::LeftButton,{},visiblePoint(originalFrame,4,*viewport));
+    clickViewport(viewport,visiblePoint(originalFrame,4,*viewport));
     check(tree->currentRow()==3,"Viewport transform test failed to select the block");
     const auto originalCaption=revision->text();
 
@@ -427,9 +638,9 @@ void exerciseViewportTransforms(QTemporaryDir& dir, bool scaled) {
         const auto paths=viewport->manipulatorPaths();
         const auto& line=paths.axes[0];
         check(line.size()==2,"Expected a projected X axis");
-        const auto point=(line.front()*.3+line.back()*.7).toPoint();
+        const auto point=(line.front().pixel*.3+line.back().pixel*.7).toPoint();
         check(hitGizmo(paths,point)==0,"Expected an unambiguous X axis start");
-        return std::pair{point,(line.back()+(line.back()-line.front())*.85).toPoint()};
+        return std::pair{point,(line.back().pixel+(line.back().pixel-line.front().pixel)*.85).toPoint()};
     };
     key(Qt::Key_2);
     check(control<QToolButton>(window,"toolMove")->isChecked(),"Viewport keyboard shortcut failed");
@@ -460,6 +671,15 @@ void exerciseViewportTransforms(QTemporaryDir& dir, bool scaled) {
           settledFrame(*viewport).tokens==before.tokens,"Lost mouse capture left a preview or revision");
     start(from);
     cursor(to);
+    settledFrame(*viewport);
+    QTest::mousePress(viewport,Qt::RightButton,{},to);
+    QTest::mouseRelease(viewport,Qt::RightButton,{},to);
+    release(to);
+    check(!viewport->dragging() && settledFrame(*viewport).tokens==before.tokens && revision->text()==originalCaption,
+          "Right-click failed to cancel the viewport transform");
+    start(from);
+    cursor(to);
+    settledFrame(*viewport);
     const double moved=position->value();
     release(to);
     check(!viewport->dragging() && position->value()==moved && revision->text()!=originalCaption,
@@ -477,10 +697,10 @@ void exerciseViewportTransforms(QTemporaryDir& dir, bool scaled) {
     for (int axis:{1,2,0}) {
         const auto& points=rings.axes[axis];
         for (size_t index=0;index+9<points.size();++index) {
-            const auto candidate=points[index].toPoint();
+            const auto candidate=points[index].pixel.toPoint();
             if (hitGizmo(rings,candidate)!=axis || !viewport->rect().contains(candidate)) continue;
             ringStart=candidate;
-            ringEnd=points[index+9].toPoint();
+            ringEnd=points[index+9].pixel.toPoint();
             rotatedAxis=axis;
             break;
         }
@@ -501,6 +721,7 @@ void exerciseViewportTransforms(QTemporaryDir& dir, bool scaled) {
     const auto unscaled=settledFrame(*viewport);
     start(scaleFrom);
     cursor(scaleTo);
+    settledFrame(*viewport);
     const auto scaledX=scale->value();
     const auto increment=control<QDoubleSpinBox>(window,"transformStep")->value();
     check(std::abs(scaledX-object.scale.x)>.05 &&
@@ -545,33 +766,94 @@ void exerciseTransformMath() {
     const TransformValue original{{-1.2f,0,0},{0,0,90},{1,2,3}};
     TransformSettings move{TransformTool::Move,false,true,.5f};
     auto paths=gizmoPaths(camera,extent,original,move);
-    auto world=TransformDrag::start(camera,extent,original,move,0,paths.axes[0].back());
+    auto world=TransformDrag::start(camera,extent,original,move,0,paths.axes[0].back().pixel);
     check(world.has_value(),"Could not start world-space math test");
-    check(world->move(paths.axes[0].back()).position==original.position,"Snapping moved a zero-distance drag");
-    const auto left=world->move(paths.axes[0].back()-QPointF(pixelPerUnit*.61,0));
+    check(world->move(paths.axes[0].back().pixel).position==original.position,"Snapping moved a zero-distance drag");
+    const auto left=world->move(paths.axes[0].back().pixel-QPointF(pixelPerUnit*.61,0));
     check(std::abs(left.position.x+2)<.001 && left.position.y==0 && left.position.z==0,
           "Signed world-axis distance did not snap to the nearest negative coordinate");
     move.local=true;
     move.snapping=false;
     paths=gizmoPaths(camera,extent,original,move);
-    auto local=TransformDrag::start(camera,extent,original,move,0,paths.axes[0].back());
+    auto local=TransformDrag::start(camera,extent,original,move,0,paths.axes[0].back().pixel);
     check(local.has_value(),"Could not start local-space math test");
-    const auto up=local->move(paths.axes[0].back()-QPointF(0,pixelPerUnit));
+    const auto up=local->move(paths.axes[0].back().pixel-QPointF(0,pixelPerUnit));
     check(std::abs(up.position.x-original.position.x)<.001 && std::abs(up.position.y-1)<.001,
           "Local X did not translate along the rotated basis");
     const TransformSettings scale{TransformTool::Scale,false,false,1};
     paths=gizmoPaths(camera,extent,original,scale);
-    auto scaling=TransformDrag::start(camera,extent,original,scale,0,paths.axes[0].back());
+    auto scaling=TransformDrag::start(camera,extent,original,scale,0,paths.axes[0].back().pixel);
     check(scaling.has_value(),"Could not start scale math test");
-    const auto enlarged=scaling->move(paths.axes[0].back()-QPointF(0,76));
+    const auto enlarged=scaling->move(paths.axes[0].back().pixel-QPointF(0,104));
     check(std::abs(enlarged.scale.x-2)<.001 && enlarged.scale.y==2 && enlarged.scale.z==3,
           "Nonuniform scale changed another local component");
     const TransformSettings rotate{TransformTool::Rotate,false,true,15};
     paths=gizmoPaths(camera,extent,original,rotate);
-    auto rotation=TransformDrag::start(camera,extent,original,rotate,2,paths.axes[2].at(0));
+    auto rotation=TransformDrag::start(camera,extent,original,rotate,2,paths.axes[2].front().pixel);
     check(rotation.has_value(),"Could not start ring math test");
-    check(std::abs(std::abs(rotation->move(paths.axes[2].at(16)).rotation.z)-180)<.01,
+    check(std::abs(std::abs(rotation->move(paths.axes[2].at(24).pixel).rotation.z)-180)<.01,
           "A quarter turn around Z did not compose with existing orientation");
+    check(rotation->rotationGuide().size()>10,"Rotation did not generate a visible angle sector");
+
+    camera.yaw=.69f;
+    camera.pitch=.52f;
+    const TransformValue object{{0,0,0},{0,0,0},{1,2,3}};
+    auto handlePoint=[](const auto& polygon) {
+        QPointF center;
+        for (const auto& point : polygon) center+=point.pixel;
+        return center/double(polygon.size());
+    };
+    const std::array<unsigned,3> passiveAxis{2,1,0};
+    for (const auto tool : {TransformTool::Move,TransformTool::Scale}) {
+        const TransformSettings settings{tool,false,false,.5f};
+        paths=gizmoPaths(camera,extent,object,settings);
+        for (int axis=0;axis<3;++axis) {
+            const auto& line=paths.axes[axis];
+            check(!line.empty() && hitGizmo(paths,line.back().pixel)==axis,"A 3D axis cap could not be hit");
+            check(TransformDrag::start(camera,extent,object,settings,axis,line.back().pixel).has_value(),
+                  "A 3D axis cap could not be dragged");
+        }
+        for (int plane=0;plane<3;++plane) {
+            check(paths.planes[plane].size()==4,"Expected each plane to be visible from the test camera");
+            const auto center=handlePoint(paths.planes[plane]);
+            check(hitGizmo(paths,center)==plane+3,"A plane handle could not be hit");
+            auto drag=TransformDrag::start(camera,extent,object,settings,plane+3,center);
+            check(drag.has_value(),"A plane handle could not be dragged");
+            const auto changed=drag->move(center+QPointF(17,29));
+            const auto fixed=passiveAxis[plane];
+            const std::array positions{changed.position.x,changed.position.y,changed.position.z};
+            const std::array scales{changed.scale.x,changed.scale.y,changed.scale.z};
+            if (tool==TransformTool::Move)
+                check(changed.position!=object.position && positions[fixed]==0,"Plane Move changed the perpendicular axis");
+            else
+                check(changed.scale!=object.scale && scales[fixed]==fixed+1,"Plane Scale changed the perpendicular axis");
+        }
+        check(hitGizmo(paths,paths.center.pixel)==6,"Center handle lost hit-test priority");
+        auto drag=TransformDrag::start(camera,extent,object,settings,6,paths.center.pixel);
+        check(drag.has_value(),"Center handle could not be dragged");
+        const auto moved=drag->move(paths.center.pixel+QPointF(52,0));
+        if (tool==TransformTool::Move)
+            check(moved.position!=object.position && moved.scale==object.scale,"Screen-plane Move failed");
+        else
+            check(moved.scale==platz::Vec3{1.5f,3.f,4.5f},"Uniform Scale did not preserve proportions");
+    }
+    paths=gizmoPaths(camera,extent,object,rotate);
+    for (int ring=0;ring<4;++ring) {
+        const auto& points=ring==3 ? paths.roll : paths.axes[ring];
+        const auto front=std::ranges::find_if(points,[&](const auto& point){return hitGizmo(paths,point.pixel)==ring;});
+        check(points.size()==97 && front!=points.end(),"Rotation ring is incomplete or cannot be hit");
+        auto drag=TransformDrag::start(camera,extent,object,rotate,ring,front->pixel);
+        const auto target=points[(front-points.begin()+40)%96].pixel;
+        check(drag && drag->move(target).rotation!=object.rotation,"Picked rotation ring did not rotate the object");
+    }
+    const TransformSettings boundsScale{TransformTool::Scale,false,false,1,true};
+    const platz::Vec3 localPivot{0,1,0};
+    paths=gizmoPaths(camera,extent,object,boundsScale,localPivot);
+    auto bounds=TransformDrag::start(camera,extent,object,boundsScale,6,paths.center.pixel,localPivot);
+    check(bounds.has_value(),"Bounds center handle could not start");
+    const auto fine=bounds->move(paths.center.pixel+QPointF(104,0),false,true);
+    check(std::abs(fine.scale.x-1.1f)<.001f && std::abs(fine.position.y+fine.scale.y-object.scale.y)<.001f,
+          "Precision scaling did not keep the bounds center stationary");
 }
 
 void exerciseInspectorPreviews(QTemporaryDir& dir) {
@@ -603,6 +885,16 @@ void exerciseInspectorPreviews(QTemporaryDir& dir) {
         QTest::keyClick(viewport,code,modifiers);
     };
     const auto editedX=spin->locale().toString(object.position.x+.65,'f',2);
+    auto* save=control<QPushButton>(window,"saveButton");
+    draft(color,"#3D474");
+    check(!save->isEnabled(),"Invalid hex made the clean project savable");
+    QTest::keyClick(color,Qt::Key_Return);
+    auto* scale=control<QDoubleSpinBox>(window,"scaleX");
+    auto* scaleEditor=scale->findChild<QLineEdit*>();
+    draft(scaleEditor,"-2.5");
+    check(scaleEditor->text()=="-2.5" && !save->isEnabled(),"Invalid scale dropped its sign or enabled Save");
+    QTest::keyClick(scaleEditor,Qt::Key_Return);
+    check(std::abs(scale->value()-object.scale.x)<.001 && !save->isEnabled(),"Invalid scale altered authoring state");
     draft(editor,editedX);
     const auto moved=settledFrame(*viewport);
     check(moved.tokens!=initial.tokens && mode->text()!=revision,"Typed number did not preview before Enter");
@@ -789,7 +1081,7 @@ void exerciseNativeGeometry(QTemporaryDir& dir) {
     check(!control<QAction>(window,"createNativeCylinder")->isEnabled() &&
           !control<QAction>(window,"editNativeMesh")->isEnabled(),"Native geometry controls remained active in Play");
     const auto runtime=settledFrame(*view);
-    QTest::mouseClick(view,Qt::LeftButton,{},visiblePoint(runtime,count+2,*view));
+    clickViewport(view,visiblePoint(runtime,count+2,*view));
     check(settledFrame(*view).tokens!=runtime.tokens,"Play did not interact with the native mesh");
     QTest::keyClick(view,Qt::Key_Escape);
     check(settledFrame(*view).rgba==edited.rgba,"Play changed authored native geometry");
@@ -1033,6 +1325,16 @@ void exerciseNativeImages(QTemporaryDir& dir) {
     chooseFile(png,[&]{control<QAction>(window,"exportLibraryPng")->trigger();});
     const auto pngRaster=rasterSource(QImage(png).convertToFormat(QImage::Format_RGBA8888));
     check(platz::sameRaster(pngRaster,expected),"PNG export lost image dimensions or RGBA");
+    auto overwritePng=[&]{control<QAction>(window,"exportLibraryPng")->trigger();};
+    QFile marker(png);
+    check(marker.open(QIODevice::WriteOnly|QIODevice::Truncate) && marker.write("keep")==4,"Cannot prepare occupied PNG");
+    marker.close();
+    chooseFile(png,overwritePng,QMessageBox::No);
+    check(marker.open(QIODevice::ReadOnly) && marker.readAll()=="keep","Declined PNG overwrite changed the target");
+    marker.close();
+    chooseFile(png,overwritePng,QMessageBox::Yes);
+    check(platz::sameRaster(rasterSource(QImage(png).convertToFormat(QImage::Format_RGBA8888)),expected),
+          "Approved PNG overwrite did not preserve RGBA");
     chooseFile(png,[&]{QTest::mouseClick(control<QPushButton>(window,"importImagePng"),Qt::LeftButton);});
     const auto imported=images->currentItem()->data(0,Qt::UserRole).toString().toStdString();
     check(imported!=id.toStdString() && images->topLevelItemCount()==2 &&
@@ -1049,7 +1351,7 @@ void exerciseNativeImages(QTemporaryDir& dir) {
     check(!control<QAction>(window,"createNativeImage")->isEnabled() &&
           !control<QPushButton>(window,"editNativeImage")->isEnabled(),"Image authoring remained enabled during Play");
     const auto play=settledFrame(*view);
-    QTest::mouseClick(view,Qt::LeftButton,{},visiblePoint(play,tree->count(),*view));
+    clickViewport(view,visiblePoint(play,tree->count(),*view));
     check(settledFrame(*view).tokens!=play.tokens,"Textured native mesh failed to interact in Play");
     key(Qt::Key_Escape);
     check(settledFrame(*view).rgba==retinted.second.rgba,"Play changed the authored image");
@@ -1352,7 +1654,7 @@ void exercise(const QString& path, bool create) {
         // Select two different depth-tested objects by actual viewport clicks.
         for (unsigned token : {2u, 4u}) {
             const auto point = visiblePoint(frame, token, *viewport);
-            QTest::mouseClick(viewport, Qt::LeftButton, {}, point);
+            clickViewport(viewport,point);
             check(name->text().toStdString() == before.objects()[token - 1].name,
                   "Viewport picking and inspector target disagree");
             frame = settledFrame(*viewport);
@@ -1384,7 +1686,7 @@ void exercise(const QString& path, bool create) {
         QTest::mouseClick(play, Qt::LeftButton);
         check(!name->isEnabled() || name->isReadOnly(), "Authoring inspector remained editable during Play");
         auto runtime = settledFrame(*viewport);
-        QTest::mouseClick(viewport, Qt::LeftButton, {}, visiblePoint(runtime, 4, *viewport));
+        clickViewport(viewport,visiblePoint(runtime, 4, *viewport));
         check(settledFrame(*viewport).rgba != runtime.rgba, "Runtime interaction failed to change visible output");
         QTest::keyClick(viewport, Qt::Key_W);
         check(settledFrame(*viewport).tokens != runtime.tokens, "Runtime navigation did not change the projection");
@@ -1411,7 +1713,7 @@ void exercise(const QString& path, bool create) {
         fileAction(reopened, Qt::Key_O, path);
         auto* viewport = static_cast<Viewport*>(control<QWidget>(reopened, "viewport"));
         auto frame = settledFrame(*viewport);
-        QTest::mouseClick(viewport, Qt::LeftButton, {}, visiblePoint(frame, 4, *viewport));
+        clickViewport(viewport,visiblePoint(frame, 4, *viewport));
         frame = settledFrame(*viewport);
         check(frame.width == expected.width && frame.height == expected.height &&
               frame.rgba == expected.rgba && frame.tokens == expected.tokens,
@@ -1430,7 +1732,7 @@ void exercise(const QString& path, bool create) {
 int main(int argc, char** argv) {
     try {
         QCoreApplication::setAttribute(Qt::AA_DontUseNativeDialogs);
-        QApplication app(argc, argv);
+        StudioTestApplication app(argc, argv);
         configureAppearance(app);
         app.setQuitOnLastWindowClosed(false);
         app.setOrganizationName("PLATZ-Tests");
@@ -1439,7 +1741,19 @@ int main(int argc, char** argv) {
         check(temp.isValid(), "Cannot create isolated test-project directory");
         QSettings::setDefaultFormat(QSettings::IniFormat);
         QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, temp.path());
+        if (app.arguments().contains("--drag-profile")) {
+            profileViewportDrag(app,temp,app.arguments().contains("--dense"),app.arguments().contains("--scaled-scene"),
+                                app.arguments().contains("--gates"));
+            return 0;
+        }
+        const auto evidence=app.arguments().indexOf("--gizmo-evidence");
+        if (evidence>=0) {
+            check(evidence+1<app.arguments().size(),"Expected a screenshot directory");
+            captureTransformEvidence(temp,app.arguments().at(evidence+1));
+            return 0;
+        }
         if (app.arguments().contains("--gizmo-only")) {
+            exerciseTransformMath();
             exerciseViewportTransforms(temp,true);
             return 0;
         }

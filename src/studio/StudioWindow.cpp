@@ -25,6 +25,7 @@
 #include <QTimer>
 #include <QToolBar>
 #include <algorithm>
+#include <cmath>
 
 StudioWindow::StudioWindow() {
     pages_ = new QStackedWidget;
@@ -295,10 +296,10 @@ void StudioWindow::refresh(const std::string& preferredAsset) {
     add_->setEnabled(!runtime_);
     undo_->setEnabled(!runtime_ && project_->canUndo());
     redo_->setEnabled(!runtime_ && project_->canRedo());
-    save_->setEnabled(!runtime_ && project_->dirty());
     saveAction_->setEnabled(!runtime_);
     restore_->setEnabled(!runtime_ && project_->canRestorePrevious());
     syncInspector();
+    syncSaveState();
     refreshAssets(preferredAsset);
     viewport_->setScene(objects,selected_);
 }
@@ -340,13 +341,39 @@ void StudioWindow::syncInspector() {
     identity_->setText(QString::fromStdString(object->id));
     syncTransform(*object);
 }
-void StudioWindow::syncTransform(const platz::Object& object) {
+void StudioWindow::syncTransform(const platz::Object& object,bool changedOnly) {
     const QScopedValueRollback<bool> refreshing(refreshing_,true);
     const std::array vectors{object.position,object.rotation,object.scale};
     for (std::size_t g=0;g<vectors.size();++g) {
-        const auto v=vectors[g];
-        axis_[g*3]->setValue(v.x); axis_[g*3+1]->setValue(v.y); axis_[g*3+2]->setValue(v.z);
+        const auto [x,y,z]=vectors[g];
+        const std::array values{x,y,z};
+        for (size_t component=0;component<values.size();++component) {
+            auto* field=axis_[g*3+component];
+            const double value=std::round(double(values[component])*1000.0)/1000.0;
+            if (!changedOnly || value!=field->value()) field->setValue(value);
+        }
     }
+}
+void StudioWindow::syncSaveState() {
+    bool savable=false;
+    if (project_ && !runtime_) {
+        savable=project_->dirty() || (preview_ && previewEditor_ && previewInputValid_ && preview_->before!=preview_->after);
+        if (!savable && name_->isModified()) {
+            if (const auto* object=project_->find(selected_)) {
+                auto draft=*object;
+                draft.name=name_->text().toStdString();
+                if (draft.name!=object->name) {
+                    try {
+                        project_->stage(draft,project_->revision());
+                        savable=true;
+                    } catch (const std::runtime_error&) {
+                        // The same project validation runs when the user finishes the edit.
+                    }
+                }
+            }
+        }
+    }
+    save_->setEnabled(savable);
 }
 void StudioWindow::syncMaterial(const platz::Object* object) {
     const QSignalBlocker block(materialSlot_);
@@ -439,6 +466,7 @@ void StudioWindow::select(std::string id,bool fromViewport) {
         tree_->setCurrentRow(row);
     }
     syncInspector();
+    syncSaveState();
     viewport_->setScene(runtime_ ? runtime_->objects() : project_->objects(),selected_);
 }
 void StudioWindow::togglePlay() {

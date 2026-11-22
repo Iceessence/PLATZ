@@ -15,7 +15,7 @@
 #include <QPushButton>
 #include <QSignalBlocker>
 #include <QTabWidget>
-#include <QTemporaryFile>
+#include <QSaveFile>
 #include <QTreeWidget>
 #include <QVBoxLayout>
 
@@ -45,7 +45,7 @@ QWidget* StudioWindow::buildImageLibrary() {
     row->addWidget(editImage_);
     row->addWidget(manageImage_);
     layout->addLayout(row);
-    connect(imageList_,&QTreeWidget::currentItemChanged,this,[this]{updateImageActions();});
+    connect(imageList_,&QTreeWidget::itemSelectionChanged,this,[this]{updateImageActions();});
     connect(imageList_,&QTreeWidget::itemDoubleClicked,this,[this]{if (editImage_->isEnabled()) editImage(selectedImage());});
     connect(importImage_,&QPushButton::clicked,this,&StudioWindow::importPng);
     connect(editImage_,&QPushButton::clicked,this,[this]{editImage(selectedImage());});
@@ -94,7 +94,8 @@ std::optional<platz::ImageTarget> StudioWindow::currentImageTarget() const {
     return platz::ImageTarget{object->id,static_cast<unsigned>(slot)};
 }
 std::string StudioWindow::selectedImage() const {
-    const auto* item=imageList_->currentItem();
+    const auto items=imageList_->selectedItems();
+    const auto* item=items.isEmpty() ? nullptr : items.front();
     return item ? item->data(0,Qt::UserRole).toString().toStdString() : std::string{};
 }
 void StudioWindow::refreshImages(const std::string& preferred) {
@@ -197,17 +198,16 @@ void StudioWindow::importPng() {
 }
 void StudioWindow::exportPng(platz::Raster raster) {
     QFileDialog dialog(this,tr("Export PNG"),{},tr("PNG images (*.png)"));
-    dialog.setOptions(QFileDialog::DontConfirmOverwrite|QFileDialog::DontUseNativeDialog);
+    dialog.setOption(QFileDialog::DontUseNativeDialog);
     dialog.setAcceptMode(QFileDialog::AcceptSave);
     dialog.setDefaultSuffix("png");
     if (dialog.exec()!=QDialog::Accepted) return;
     const auto path=dialog.selectedFiles().constFirst();
-    QTemporaryFile file(QFileInfo(path).absoluteDir().filePath(".platz-png-XXXXXX"));
+    QSaveFile file(path);
     QImageWriter writer(&file,"png");
-    if (!file.open() || !writer.write(canvasImage(raster)) || !file.flush() || !file.rename(path)) {
-        notify(tr("Could not export PNG. Choose a writable folder and a new filename."));
+    if (!file.open(QIODevice::WriteOnly) || !writer.write(canvasImage(raster)) || !file.commit()) {
+        notify(tr("Could not export PNG. Choose a writable destination."));
         return;
     }
-    file.setAutoRemove(false);
     notify(tr("Exported the RGBA pixels as PNG."));
 }

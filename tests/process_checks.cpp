@@ -168,6 +168,19 @@ void run(const QString& executable, const QString& source, IUIAutomation& automa
         check(valueOf(*editor.Get())==(launch==0 ? original : changed),"Reopened Inspector name differs from saved source.");
         check(named(automation,*root.Get(),identity,UIA_TextControlTypeId).Get()!=nullptr,"Selected stable identity missing from Inspector.");
         if (launch==0) {
+            const auto selectRow=[&](const std::wstring& name) {
+                auto row=named(automation,*root.Get(),name,UIA_ListItemControlTypeId);
+                check(row.Get()!=nullptr,"Could not find accessible Scene row.");
+                ComPtr<IUIAutomationSelectionItemPattern> selection;
+                checkCall(row->GetCurrentPatternAs(UIA_SelectionItemPatternId,IID_PPV_ARGS(&selection)),
+                          "Scene row lacks selection access.");
+                checkCall(selection->Select(),"Accessible Scene selection failed.");
+                waitFor(child,"Accessible Scene selection did not update the Inspector.",[&]{
+                    return valueOf(*editor.Get())==name;
+                });
+            };
+            selectRow(L"Harbor signs");
+            selectRow(original);
             checkCall(editor->SetFocus(),"Cannot focus object name.");
             postKey(search.window,pid,VK_END);
             postKey(search.window,pid,'7');

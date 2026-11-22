@@ -11,7 +11,6 @@
 #include <QDir>
 #include <QDockWidget>
 #include <QDoubleSpinBox>
-#include <QFileInfo>
 #include <QFileDialog>
 #include <QGridLayout>
 #include <QLabel>
@@ -24,13 +23,22 @@
 #include <QSettings>
 #include <QStackedWidget>
 #include <QStatusBar>
-#include <QTemporaryFile>
+#include <QSaveFile>
 #include <QToolBar>
 #include <QTreeWidget>
 #include <algorithm>
 #include <cmath>
 
 namespace {
+class ScaleField final : public QDoubleSpinBox {
+public:
+    QValidator::State validate(QString& text,int& cursor) const override {
+        // Keep the minus sign while the user types so a rejected scale can never turn positive.
+        if (text.startsWith(locale().negativeSign()) || text.startsWith('-')) return QValidator::Intermediate;
+        return QDoubleSpinBox::validate(text,cursor);
+    }
+};
+
 class AxisScrubber final : public QLabel {
 public:
     using QLabel::QLabel;
@@ -44,6 +52,11 @@ public:
     }
 protected:
     void mousePressEvent(QMouseEvent* event) override {
+        if (startValue_ && event->button()==Qt::RightButton) {
+            end(false);
+            event->accept();
+            return;
+        }
         if (event->button()!=Qt::LeftButton) return;
         startValue_=begin();
         if (!startValue_) return;
@@ -270,8 +283,11 @@ void StudioWindow::buildStudio() {
     sceneDock_->setMinimumWidth(152);
     sceneDock_->setWidget(side);
     addDockWidget(Qt::LeftDockWidgetArea,sceneDock_);
-    connect(tree_,&QListWidget::currentItemChanged,this,[this](QListWidgetItem* item){
-        if (!refreshing_) select(item ? item->data(Qt::UserRole).toString().toStdString() : std::string{},false);
+    connect(tree_,&QListWidget::itemSelectionChanged,this,[this]{
+        if (refreshing_) return;
+        const auto items=tree_->selectedItems();
+        const auto id=items.isEmpty() ? std::string{} : items.front()->data(Qt::UserRole).toString().toStdString();
+        if (id!=selected_) select(id,false);
     });
     buildInspector();
     buildAssets();
@@ -322,6 +338,7 @@ void StudioWindow::buildInspector() {
     connect(name_,&QLineEdit::editingFinished,this,[this]{
         if (name_->isModified()) applyEdit([this](platz::Object& o){o.name=name_->text().toStdString();});
     });
+    connect(name_,&QLineEdit::textEdited,this,[this]{syncSaveState();});
 
     section(box,tr("TRANSFORM"));
     const std::array<QString,3> groups{tr("Position"),tr("Rotation"),tr("Scale")};
@@ -334,7 +351,7 @@ void StudioWindow::buildInspector() {
         auto* row = new QHBoxLayout;
         row->setSpacing(4);
         for (int coordinate=0;coordinate<3;++coordinate) {
-            auto* field = new QDoubleSpinBox;
+            QDoubleSpinBox* field=group==2 ? new ScaleField : new QDoubleSpinBox;
             const int index=group*3+coordinate;
             axis_[index]=field;
             field->setObjectName(fieldIds[group]+axes[coordinate]);
@@ -499,10 +516,6 @@ void StudioWindow::buildInspector() {
     scroll->setWidget(inspector_);
     inspectorDock_->setWidget(scroll);
     addDockWidget(Qt::RightDockWidgetArea,inspectorDock_);
-    for (auto* editor : inspector_->findChildren<QLineEdit*>())
-        connect(editor,&QLineEdit::textEdited,this,[this]{
-            if (project_ && !runtime_ && !refreshing_) save_->setEnabled(true);
-        });
 }
 
 void StudioWindow::saveEmbeddedGlb() {
@@ -514,19 +527,18 @@ void StudioWindow::saveEmbeddedGlb() {
 
 void StudioWindow::writeGlbSource(std::shared_ptr<const platz::MeshAsset> source,bool native) {
     QFileDialog dialog(this,native ? tr("Export mesh GLB") : tr("Save original GLB"),{},tr("Binary glTF (*.glb)"));
-    dialog.setOptions(QFileDialog::DontConfirmOverwrite|QFileDialog::DontUseNativeDialog);
+    dialog.setOption(QFileDialog::DontUseNativeDialog);
     dialog.setAcceptMode(QFileDialog::AcceptSave);
     dialog.setDefaultSuffix("glb");
     if (dialog.exec()!=QDialog::Accepted) return;
     const auto destination=dialog.selectedFiles().constFirst();
-    QTemporaryFile file(QFileInfo(destination).absoluteDir().filePath(".platz-glb-XXXXXX"));
+    QSaveFile file(destination);
     const auto size=static_cast<qint64>(source->source().size());
-    if (!file.open() || file.write(reinterpret_cast<const char*>(source->source().data()),size)!=size ||
-        !file.flush() || !file.rename(destination)) {
-        notify(tr("Could not save the GLB. Choose a writable folder and a new filename."));
+    if (!file.open(QIODevice::WriteOnly) || file.write(reinterpret_cast<const char*>(source->source().data()),size)!=size ||
+        !file.commit()) {
+        notify(tr("Could not save the GLB. Choose a writable destination."));
         return;
     }
-    file.setAutoRemove(false);
     notify(native ? tr("Exported the generated mesh.") : tr("Saved the original GLB source."));
 }
 

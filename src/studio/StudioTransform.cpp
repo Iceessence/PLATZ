@@ -39,10 +39,17 @@ void StudioWindow::buildTransformControls(QWidget* host) {
     transformSpace_->setToolTip(tr("Move and Rotate can use world or object axes. Scale uses object axes."));
     tools->addSpacing(4);
     tools->addWidget(transformSpace_);
-    connect(transformSpace_,&QComboBox::currentIndexChanged,this,[this]{configureManipulator();});
-    scaleSpace_=new QLabel(tr("Local axes"),host);
-    scaleSpace_->setToolTip(tr("Scale follows the object's axes."));
-    tools->addWidget(scaleSpace_);
+    connect(transformSpace_,&QComboBox::currentIndexChanged,this,[this](int index){
+        localTransformAxes_=index==1;
+        configureManipulator();
+    });
+    transformPivot_=new QComboBox(host);
+    transformPivot_->setObjectName("transformPivot");
+    transformPivot_->setAccessibleName(tr("Transform pivot"));
+    transformPivot_->addItems({tr("Object pivot"),tr("Bounds center")});
+    transformPivot_->setToolTip(tr("Transform around the object's origin or the center of its mesh bounds."));
+    tools->addWidget(transformPivot_);
+    connect(transformPivot_,&QComboBox::currentIndexChanged,this,[this]{configureManipulator();});
     transformSnap_=new QToolButton(host);
     transformSnap_->setObjectName("transformSnap");
     transformSnap_->setText(tr("Snap"));
@@ -74,9 +81,10 @@ void StudioWindow::configureManipulator() {
     const auto mode=static_cast<unsigned>(transformTool_);
     const bool manipulating=transformTool_!=TransformTool::Select;
     const bool scaling=transformTool_==TransformTool::Scale;
-    transformSpace_->setVisible(!scaling);
-    transformSpace_->setEnabled(manipulating);
-    scaleSpace_->setVisible(scaling);
+    const QSignalBlocker spaceSignals(transformSpace_);
+    transformSpace_->setCurrentIndex(scaling || localTransformAxes_ ? 1 : 0);
+    transformSpace_->setEnabled(manipulating && !scaling);
+    transformPivot_->setEnabled(manipulating);
     transformSnap_->setEnabled(manipulating);
     transformStep_->setEnabled(manipulating && transformSnap_->isChecked());
     const std::array<QString,4> units{"",tr(" m"),"°","×"};
@@ -84,14 +92,18 @@ void StudioWindow::configureManipulator() {
     transformStep_->setSuffix(units[mode]);
     transformStep_->setValue(snapSteps_[mode]);
     if (viewport_) viewport_->setTransformSettings({transformTool_,transformSpace_->currentIndex()==1,
-                                                     transformSnap_->isChecked(),float(snapSteps_[mode])});
+                                                     transformSnap_->isChecked(),float(snapSteps_[mode]),
+                                                     transformPivot_->currentIndex()==1});
 }
 
 bool StudioWindow::beginPreview(const std::string& id) {
     if (refreshing_ || !project_ || runtime_ || preview_ || id!=selected_) return false;
     if (const auto* object=project_->find(id)) {
         protectedCall([&]{preview_=project_->stage(*object,project_->revision());});
-        if (preview_) mode_->setText(tr("Preview  ·  Escape to cancel"));
+        if (preview_) {
+            transformInspectorClock_.invalidate();
+            mode_->setText(tr("Preview  ·  Escape to cancel"));
+        }
         return preview_.has_value();
     }
     return false;
@@ -116,6 +128,7 @@ void StudioWindow::previewField(QWidget* editor,const std::function<void(platz::
     previewInputValid_=static_cast<bool>(change);
     if (change) change(edit.after);
     viewport_->previewObject(edit.after);
+    syncSaveState();
 }
 void StudioWindow::finishFieldPreview(QWidget* editor) {
     if (refreshing_ || previewEditor_!=editor) return;
@@ -155,8 +168,24 @@ void StudioWindow::previewTransform(const platz::studio::TransformValue& value) 
     object.position=value.position;
     object.rotation=value.rotation;
     object.scale=value.scale;
-    viewport_->previewObject(object);
-    syncTransform(object);
+    viewport_->previewObject(object,false);
+    // The GPU preview follows each paint. The separate Qt backing store needs fewer numeric repaints.
+    if (!transformInspectorClock_.isValid() || transformInspectorClock_.hasExpired(49)) {
+        syncTransform(object,true);
+        const auto& original=preview_->before;
+        if (transformTool_==TransformTool::Rotate) {
+            controls_->setText(tr("Rotation %1°  ·  Ctrl toggles snap  ·  Shift precision  ·  Right-click to cancel")
+                                  .arg(viewport_->dragAngle(),0,'f',1));
+        } else {
+            const bool scale=transformTool_==TransformTool::Scale;
+            const auto x=scale ? value.scale.x/original.scale.x : value.position.x-original.position.x;
+            const auto y=scale ? value.scale.y/original.scale.y : value.position.y-original.position.y;
+            const auto z=scale ? value.scale.z/original.scale.z : value.position.z-original.position.z;
+            controls_->setText((scale ? tr("Scale  X %1×  Y %2×  Z %3×") : tr("Move  X %1 m  Y %2 m  Z %3 m"))
+                                  .arg(x,0,'f',2).arg(y,0,'f',2).arg(z,0,'f',2));
+        }
+        transformInspectorClock_.start();
+    }
 }
 void StudioWindow::finishPreview(bool commit) {
     if (!preview_) return;

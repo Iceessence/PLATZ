@@ -96,6 +96,13 @@ void run() {
     auto sidePixel = std::find(frame.tokens.begin(), frame.tokens.end(), side.token) - frame.tokens.begin();
     check(gpu.pick(int(sidePixel % width), int(sidePixel / width)) == side.token,
           "Pointer pick disagrees with presented identity attachment");
+    check(gpu.requestPick(int(sidePixel%width),int(sidePixel/width)),"Asynchronous selection could not queue the ID pixel");
+    check(!gpu.requestPick(width/2,height/2),"A pending selection was overwritten");
+    auto changedIds=scene;
+    for (auto& object : changedIds) object.token+=1000;
+    gpu.draw(changedIds,camera);
+    gpu.capture(); // Explicit test-only synchronization with the intervening frame.
+    check(gpu.pollPick()==side.token && !gpu.pollPick(),"Asynchronous selection did not retain the clicked frame identity");
 
     std::reverse(scene.begin(), scene.end());
     gpu.draw(scene, camera);
@@ -112,6 +119,21 @@ void run() {
     const auto withOverlay=gpu.capture();
     check(withOverlay.tokens==frame.tokens && withOverlay.rgba!=frame.rgba &&
           gpu.pick(width/2,height/2)==shell.token,"Overlay changed picking or failed to draw");
+    auto fadedOverlay=overlay;
+    for (auto& vertex : fadedOverlay) vertex.depth=1.f;
+    gpu.draw(scene,camera,0,fadedOverlay);
+    const auto behind=gpu.capture();
+    const size_t center=(height/2*width+width/2)*4;
+    const auto effect=[&](const Capture& capture) {
+        int change=0;
+        for (size_t i=center;i<center+3;++i) change+=std::abs(int(capture.rgba[i])-frame.rgba[i]);
+        return change;
+    };
+    check(effect(withOverlay)>30 && std::abs(effect(behind)-.3*effect(withOverlay))<4 && behind.tokens==frame.tokens,
+          "Depth-occluded overlay did not preserve IDs and blend at 30 percent");
+    for (auto& vertex : fadedOverlay) {vertex.depth=0.f; vertex.opacity=.45f;}
+    gpu.draw(scene,camera,0,fadedOverlay);
+    check(std::abs(effect(gpu.capture())-.45*effect(withOverlay))<4,"Overlay vertex coverage did not blend with scene color");
 
     scene.back().color = {0.1f,0.8f,0.9f};
     gpu.draw(scene, camera);

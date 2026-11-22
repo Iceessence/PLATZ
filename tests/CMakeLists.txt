@@ -25,11 +25,13 @@ target_compile_definitions(platz_studio_checks PRIVATE
 target_compile_definitions(platz_studio_checks PRIVATE PLATZ_VALIDATION_PATH="${PROJECT_SOURCE_DIR}/projects/PLATZ Validation.platz")
 add_test(NAME studio_edit_play_reopen COMMAND platz_studio_checks)
 add_test(NAME studio_transform_highdpi COMMAND platz_studio_checks --gizmo-only)
+add_test(NAME studio_transform_200dpi COMMAND platz_studio_checks --gizmo-only)
+add_test(NAME studio_visible_drag_profile COMMAND platz_studio_checks --drag-profile --dense --gates)
 add_test(NAME studio_native_geometry COMMAND platz_studio_checks --native-mesh-only)
 add_test(NAME studio_native_images COMMAND platz_studio_checks --image-only)
 add_test(NAME studio_workspaces COMMAND platz_studio_checks --workspaces)
 add_test(NAME studio_workspaces_highdpi COMMAND platz_studio_checks --workspaces --highdpi)
-set(studio_checks studio_edit_play_reopen studio_transform_highdpi studio_native_geometry studio_native_images
+set(studio_checks studio_edit_play_reopen studio_transform_highdpi studio_transform_200dpi studio_native_geometry studio_native_images
     studio_workspaces studio_workspaces_highdpi)
 set_tests_properties(${studio_checks} PROPERTIES LABELS "hardware;interactive" TIMEOUT 90 RUN_SERIAL TRUE)
 set_tests_properties(${studio_checks} PROPERTIES
@@ -42,6 +44,10 @@ set_tests_properties(${all_gpu_checks} PROPERTIES
     ENVIRONMENT "PLATZ_VK_VALIDATION=1;VK_LAYER_PATH=${PROJECT_SOURCE_DIR}/.deps/graphics/sdk/Bin;VK_KHRONOS_VALIDATION_VALIDATE_SYNC=true")
 set_property(TEST hardware_gpu_assisted APPEND PROPERTY ENVIRONMENT "VK_KHRONOS_VALIDATION_GPUAV_ENABLE=true")
 set_property(TEST studio_transform_highdpi studio_workspaces_highdpi APPEND PROPERTY ENVIRONMENT "QT_SCALE_FACTOR=1.5")
+set_property(TEST studio_transform_200dpi APPEND PROPERTY ENVIRONMENT "QT_SCALE_FACTOR=2")
+set_tests_properties(studio_visible_drag_profile PROPERTIES LABELS "hardware;interactive;benchmark" TIMEOUT 60 RUN_SERIAL TRUE
+    ENVIRONMENT "PLATZ_VK_VALIDATION=0"
+    ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>;PATH=path_list_prepend:$<TARGET_FILE_DIR:platz_sdl3>")
 set_target_properties(platz_gpu_checks platz_studio_checks PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests/$<CONFIG>")
 add_executable(platz_process_checks process_checks.cpp)

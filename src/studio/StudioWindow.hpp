@@ -2,6 +2,7 @@
 #include "Project.hpp"
 #include "Appearance.hpp"
 #include "TransformGizmo.hpp"
+#include <QElapsedTimer>
 #include <QMainWindow>
 #include <array>
 #include <functional>
@@ -39,6 +40,7 @@ private:
     std::optional<platz::ObjectEdit> preview_;
     QWidget* previewEditor_{};
     bool previewInputValid_{};
+    QElapsedTimer transformInspectorClock_;
     std::function<void()> stopScrubbing_;
     std::string selected_, beforePlay_;
     QStackedWidget* pages_{};
@@ -50,7 +52,8 @@ private:
     QWidget* transformControls_{};
     QButtonGroup* transformModes_{};
     QComboBox* transformSpace_{};
-    QLabel* scaleSpace_{};
+    QComboBox* transformPivot_{};
+    bool localTransformAxes_{};
     QToolButton* transformSnap_{};
     QDoubleSpinBox* transformStep_{};
     std::array<double,4> snapSteps_{1.0,1.0,15.0,0.1};
@@ -144,7 +147,8 @@ private:
     void finishPreview(bool commit);
     void cancelPreview();
     void previewColor(QWidget* editor, QColor color);
-    void syncTransform(const platz::Object& object);
+    void syncTransform(const platz::Object& object, bool changedOnly = false);
+    void syncSaveState();
     void refreshAssets(const std::string& preferred = {});
     void updateAssetActions();
     std::string selectedAsset() const;

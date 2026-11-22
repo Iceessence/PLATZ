@@ -41,7 +41,7 @@ void StudioWindow::buildAssets() {
     assetList_->header()->setSectionResizeMode(1,QHeaderView::ResizeToContents);
     assetList_->setMinimumHeight(75);
     layout->addWidget(assetList_,1);
-    connect(assetList_,&QTreeWidget::currentItemChanged,this,[this]{updateAssetActions();});
+    connect(assetList_,&QTreeWidget::itemSelectionChanged,this,[this]{updateAssetActions();});
 
     auto* actions=new QHBoxLayout;
     importAsset_=new QPushButton(tr("Import…"));
@@ -145,7 +145,8 @@ void StudioWindow::buildAssets() {
 }
 
 std::string StudioWindow::selectedAsset() const {
-    const auto* item=assetList_->currentItem();
+    const auto items=assetList_->selectedItems();
+    const auto* item=items.isEmpty() ? nullptr : items.front();
     return item ? item->data(0,Qt::UserRole).toString().toStdString() : std::string{};
 }
 
