@@ -96,6 +96,26 @@ void run() {
     auto sidePixel = std::find(frame.tokens.begin(), frame.tokens.end(), side.token) - frame.tokens.begin();
     check(gpu.pick(int(sidePixel % width), int(sidePixel / width)) == side.token,
           "Pointer pick disagrees with presented identity attachment");
+    auto distant=shell;
+    distant.position={10000,2,0};
+    distant.token=409;
+    const std::array spread{shell,inside,side,distant};
+    gpu.draw(spread,camera);
+    const auto clipped=gpu.capture();
+    check(clipped.tokens==frame.tokens && clipped.rgba==frame.rgba &&
+          gpu.diagnostics().find("| objects culled 1 |")!=std::string::npos,
+          "Offscreen object altered the rendered scene or was submitted");
+    auto remoteCamera=camera;
+    remoteCamera.target=distant.position;
+    gpu.draw(spread,remoteCamera);
+    check(gpu.pick(width/2,height/2)==distant.token,"Camera movement did not restore a previously culled object");
+    auto edgeCamera=camera;
+    edgeCamera.yaw=edgeCamera.pitch=0;
+    auto edge=shell;
+    edge.position[0]=5.5f;
+    gpu.draw(std::span(&edge,1),edgeCamera);
+    check(coverage(gpu.capture(),edge.token)>0,"Partly visible cube disappeared at the frustum boundary");
+    gpu.draw(scene,camera);
     check(gpu.requestPick(int(sidePixel%width),int(sidePixel/width)),"Asynchronous selection could not queue the ID pixel");
     check(!gpu.requestPick(width/2,height/2),"A pending selection was overwritten");
     auto changedIds=scene;

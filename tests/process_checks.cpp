@@ -166,10 +166,30 @@ void run(const QString& executable, const QString& source, IUIAutomation& automa
             return editor.Get() != nullptr;
         });
         check(valueOf(*editor.Get())==(launch==0 ? original : changed),"Reopened Inspector name differs from saved source.");
-        check(named(automation,*root.Get(),identity,UIA_TextControlTypeId).Get()!=nullptr,"Selected stable identity missing from Inspector.");
+        // Object metadata starts collapsed. Exercise the same disclosure a user operates.
+        if (!named(automation,*root.Get(),identity,UIA_TextControlTypeId)) {
+            Element disclosure;
+            for (auto type : {UIA_ButtonControlTypeId,UIA_CheckBoxControlTypeId}) {
+                disclosure=named(automation,*root.Get(),L"Object ID",type);
+                if (disclosure) break;
+            }
+            check(disclosure.Get()!=nullptr,"Object ID disclosure is missing from the accessible Inspector.");
+            ComPtr<IUIAutomationTogglePattern> toggle;
+            if (SUCCEEDED(disclosure->GetCurrentPatternAs(UIA_TogglePatternId,IID_PPV_ARGS(&toggle))) && toggle) {
+                checkCall(toggle->Toggle(),"Could not toggle the Object ID disclosure.");
+            } else {
+                ComPtr<IUIAutomationInvokePattern> invoke;
+                checkCall(disclosure->GetCurrentPatternAs(UIA_InvokePatternId,IID_PPV_ARGS(&invoke)),
+                          "Object ID disclosure is not keyboard-accessible.");
+                checkCall(invoke->Invoke(),"Could not invoke the Object ID disclosure.");
+            }
+        }
+        waitFor(child,"Selected stable identity missing after expanding Object ID.",[&]{
+            return named(automation,*root.Get(),identity,UIA_TextControlTypeId).Get()!=nullptr;
+        });
         if (launch==0) {
             const auto selectRow=[&](const std::wstring& name) {
-                auto row=named(automation,*root.Get(),name,UIA_ListItemControlTypeId);
+                auto row=named(automation,*root.Get(),name,UIA_TreeItemControlTypeId);
                 check(row.Get()!=nullptr,"Could not find accessible Scene row.");
                 ComPtr<IUIAutomationSelectionItemPattern> selection;
                 checkCall(row->GetCurrentPatternAs(UIA_SelectionItemPatternId,IID_PPV_ARGS(&selection)),

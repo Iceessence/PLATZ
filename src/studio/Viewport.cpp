@@ -47,6 +47,7 @@ void Viewport::setScene(const std::vector<platz::Object>& objects, const std::st
     pickIds_.clear();
     queuedPick_.reset();
     displayedGizmo_={};
+    idsChanged_=true;
     ids_.clear();
     draws_.clear();
     selection_ = 0;
@@ -156,6 +157,7 @@ void Viewport::fail(const std::exception& error) {
     failed_ = true;
     cancelDrag();
     displayedIds_.clear();
+    idsChanged_=true;
     pickTimer_.stop();
     frameRetry_.stop();
     pickIds_.clear();
@@ -173,6 +175,7 @@ void Viewport::retryRenderer() {
     queuedPick_.reset();
     renderer_.reset();
     displayedIds_.clear();
+    idsChanged_=true;
     surface_ = {};
     backendText_.clear();
     failed_ = false;
@@ -214,7 +217,10 @@ bool Viewport::renderScene(bool waitForFrame) {
             backendText_=backend;
             if (onBackend) onBackend(backendText_);
         }
-        displayedIds_ = ids_;
+        if (idsChanged_) {
+            displayedIds_ = ids_;
+            idsChanged_=false;
+        }
         return true;
     } catch (const std::exception& error) { fail(error); }
     return false;

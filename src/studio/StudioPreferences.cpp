@@ -1,4 +1,5 @@
 #include "StudioWindow.hpp"
+#include "OrganizerTree.hpp"
 #include "Viewport.hpp"
 #include <QAction>
 #include <QApplication>
@@ -18,6 +19,7 @@
 #include <QSettings>
 #include <QShortcut>
 #include <QTabWidget>
+#include <QTreeWidget>
 #include <QVBoxLayout>
 #include <algorithm>
 
@@ -101,7 +103,7 @@ void StudioWindow::syncControlHelp() {
     controls_->setText(runtime_ ? tr("Click to turn an object   ·   WASD move   ·   Esc stop") : tools);
     auto accessibility=tr("1 Select, 2 Move, 3 Rotate, 4 Scale. Escape cancels a drag. Arrow keys orbit and W A S D move the camera.");
     if (!frameKey.isEmpty()) accessibility+=tr(" %1 frames the selection.").arg(frameKey);
-    viewport_->setAccessibleDescription(accessibility);
+    viewport_->setAccessibleDescription(runtime_ ? controls_->text() : accessibility);
 }
 void StudioWindow::saveStudioPreferences() {
     QSettings settings;
@@ -232,28 +234,47 @@ void StudioWindow::customizeStudio() {
 void StudioWindow::findCommands() {
     QDialog dialog(this);
     dialog.setObjectName("studioCommandSearch");
-    dialog.setWindowTitle(tr("Find commands"));
+    dialog.setWindowTitle(tr("Search Studio"));
     auto* layout=new QVBoxLayout(&dialog);
     auto* search=new QLineEdit;
     search->setObjectName("studioCommandFilter");
-    search->setAccessibleName(tr("Find available Studio commands"));
-    search->setPlaceholderText(tr("Search commands, for example texture, frame or workspace"));
+    search->setAccessibleName(tr("Search commands, objects and assets"));
+    search->setPlaceholderText(tr("Search commands, scene objects and project assets"));
+    search->setClearButtonEnabled(true);
     auto* results=new QListWidget;
     results->setObjectName("studioCommandResults");
-    results->setAccessibleName(tr("Matching Studio commands"));
+    results->setAccessibleName(tr("Matching commands, objects and assets"));
     layout->addWidget(search);
     layout->addWidget(results,1);
-    struct Entry { QString section, name; QAction* action; };
+    struct Entry { QString section, name, shortcut; std::function<void()> activate; };
     QList<Entry> entries;
     const auto collect=[&](const auto& self,const QList<QAction*>& actions,const QString& section)->void {
         for (auto* action:actions) {
             if (action->isSeparator() || !action->isVisible() || !action->isEnabled() || action==searchCommandsAction_) continue;
             const auto name=commandName(action);
             if (action->menu()) self(self,action->menu()->actions(),section.isEmpty() ? name : section+" › "+name);
-            else entries.append({section,name,action});
+            else entries.append({section,name,shortcutText(action->shortcut()),[action]{
+                if (action->isEnabled()) action->trigger();
+            }});
         }
     };
     collect(collect,menuBar()->actions(),{});
+    if (project_) {
+        for (const auto& object:project_->objects())
+            entries.append({tr("Scene"),QString::fromStdString(object.name),{},[this,id=object.id]{
+                select(id,false);
+                viewport_->setFocus();
+            }});
+        for (const auto& [key,asset]:project_->meshLibrary())
+            entries.append({tr("Meshes"),QString::fromStdString(asset.name),{},[this,key]{
+                assetsDock_->show();
+                assetTabs_->setCurrentIndex(0);
+                assetList_->revealSource(QString::fromStdString(key));
+                assetList_->setFocus();
+            }});
+        for (const auto& [id,image]:project_->imageLibrary())
+            entries.append({tr("Images"),QString::fromStdString(image.name),{},[this,id]{showImage(id);}});
+    }
     auto filter=[&]{
         const auto input=search->text().simplified();
         const auto terms=input.split(' ',Qt::SkipEmptyParts);
@@ -262,7 +283,7 @@ void StudioWindow::findCommands() {
             const auto& item=entries[i];
             const auto path=item.section+" › "+item.name;
             if (!std::ranges::all_of(terms,[&](const QString& term){return path.contains(term,Qt::CaseInsensitive);})) continue;
-            const auto key=shortcutText(item.action->shortcut());
+            const auto& key=item.shortcut;
             auto* row=new QListWidgetItem(key.isEmpty() ? path : path+"    "+key,results);
             row->setData(Qt::UserRole,i);
         }
@@ -272,10 +293,18 @@ void StudioWindow::findCommands() {
     connect(search,&QLineEdit::textChanged,&dialog,filter);
     connect(search,&QLineEdit::returnPressed,&dialog,run);
     connect(results,&QListWidget::itemActivated,&dialog,run);
+    for (const auto key:{Qt::Key_Up,Qt::Key_Down}) {
+        auto* step=new QShortcut(QKeySequence(key),search);
+        step->setContext(Qt::WidgetShortcut);
+        connect(step,&QShortcut::activated,&dialog,[results,key]{
+            if (results->count())
+                results->setCurrentRow(std::clamp(results->currentRow()+(key==Qt::Key_Up ? -1 : 1),
+                                                  0,results->count()-1));
+        });
+    }
     filter();
     dialog.resize(560,410);
     search->setFocus();
     if (dialog.exec()!=QDialog::Accepted || !results->currentItem()) return;
-    auto* action=entries.at(results->currentItem()->data(Qt::UserRole).toInt()).action;
-    if (action->isEnabled()) action->trigger();
+    entries.at(results->currentItem()->data(Qt::UserRole).toInt()).activate();
 }

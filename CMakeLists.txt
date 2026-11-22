@@ -16,6 +16,7 @@ add_subdirectory(src/assets)
 add_subdirectory(src/core)
 add_subdirectory(src/engine)
 add_library(platz_studio STATIC src/studio/StudioWindow.cpp src/studio/StudioPanels.cpp src/studio/StudioAssets.cpp
+    src/studio/OrganizerTree.cpp src/studio/StudioOrganization.cpp src/studio/StudioInspectorSources.cpp
     src/studio/StudioNativeMesh.cpp src/studio/StudioImages.cpp src/studio/StudioImageEditor.cpp
     src/studio/RasterCanvas.cpp src/studio/Viewport.cpp src/studio/StudioTransform.cpp src/studio/StudioWorkspaces.cpp
     src/studio/TransformGizmo.cpp src/studio/StudioPreferences.cpp src/studio/Appearance.cpp)

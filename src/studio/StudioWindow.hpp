@@ -6,6 +6,7 @@
 #include <QMainWindow>
 #include <array>
 #include <functional>
+#include <memory>
 #include <optional>
 
 class QAction;
@@ -18,19 +19,21 @@ class QDockWidget;
 class QDoubleSpinBox;
 class QLabel;
 class QLineEdit;
-class QListWidget;
+class OrganizerTree;
+class StudioOrganization;
 class QMenu;
 class QPushButton;
 class QStackedWidget;
 class QTabWidget;
 class QToolBar;
 class QToolButton;
-class QTreeWidget;
+class QVBoxLayout;
 class Viewport;
 
 class StudioWindow final : public QMainWindow {
 public:
     StudioWindow();
+    ~StudioWindow() override;
     bool openProject(const QString& path);
 protected:
     void closeEvent(QCloseEvent*) override;
@@ -58,12 +61,19 @@ private:
     QDoubleSpinBox* transformStep_{};
     std::array<double,4> snapSteps_{1.0,1.0,15.0,0.1};
     platz::studio::TransformTool transformTool_=platz::studio::TransformTool::Select;
-    QListWidget* tree_{};
+    std::unique_ptr<StudioOrganization> organization_;
+    OrganizerTree* tree_{};
+    QWidget* inspectorDetails_{};
+    QLabel* inspectorEmpty_{};
+    QComboBox* meshSourcePicker_{};
+    QPushButton* makeEditableMesh_{};
+    QToolButton* appearanceSource_{};
+    QToolButton* geometryActions_{};
     QLineEdit *name_{}, *color_{};
     QComboBox* materialSlot_{};
     QCheckBox* useTexture_{};
     QComboBox* imageSlot_{};
-    QPushButton* locateImage_{};
+    QPushButton *locateImage_{}, *makeImageUnique_{};
     QLabel* textureInfo_{};
     QPushButton* resetSlot_{};
     std::string materialOwner_;
@@ -71,8 +81,10 @@ private:
     QLabel *projectTitle_{}, *mode_{}, *count_{}, *mesh_{}, *identity_{}, *backend_{}, *notice_{}, *recent_{}, *controls_{};
     QPushButton *play_{}, *save_{}, *add_{}, *swatch_{}, *recentOpen_{};
     QPushButton *saveGlb_{}, *locateMesh_{};
-    QTreeWidget* assetList_{};
-    QTreeWidget* imageList_{};
+    OrganizerTree* assetList_{};
+    OrganizerTree* imageList_{};
+    QLabel* emptyImages_{};
+    QPushButton* newImage_{};
     QTabWidget* assetTabs_{};
     QPushButton *importAsset_{}, *placeAsset_{}, *assignAsset_{}, *manageAsset_{};
     QPushButton *importImage_{}, *editImage_{}, *manageImage_{};
@@ -161,6 +173,11 @@ private:
     void toHub();
     void refresh(const std::string& preferredAsset = {});
     void syncInspector();
+    void refreshSceneTree();
+    void buildInspectorSources(QVBoxLayout& layout);
+    void syncMeshSources(const platz::Object* object);
+    QString assetChoiceLabel(bool image,const QString& id,QString name) const;
+    void populateAppearanceSources();
     void syncMaterial(const platz::Object* object);
     void applyEdit(const std::function<void(platz::Object&)>& change);
     void finishActiveField();

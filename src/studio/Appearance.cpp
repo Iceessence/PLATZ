@@ -67,6 +67,7 @@ void applyStudioAppearance(QApplication& app,const StudioAppearance& appearance)
     const auto hover=blend(QColor(colors.surface),text,.09);
     const QColor warning(light ? "#7d4900" : "#f6c276");
     const auto scale=[&](int base){return QString::number(qRound(base*appearance.scale/100.0));};
+    const auto points=[&](double pt){return QString::number(pt*appearance.scale/100.0,'f',2);};
     auto font=QFont("Segoe UI");
     font.setPointSizeF(10.0*appearance.scale/100.0);
     app.setFont(font);
@@ -89,6 +90,9 @@ void applyStudioAppearance(QApplication& app,const StudioAppearance& appearance)
 QMainWindow, QDialog, QWidget#projectHub { background: $background; }
 QLabel { background: transparent; }
 QMenuBar, QStatusBar { background: $bar; color: $secondary; }
+QMenu { background: $panel; border: 1px solid $edge; padding: $smallpx; }
+QMenu::item { padding: $smallpx 24px; }
+QMenu::separator { height: 1px; background: $edge; margin: $smallpx; }
 QMenuBar { padding: 2px $widepx; }
 QMenuBar::item { padding: $smallpx $widepx; }
 QMenuBar::item:selected, QMenu::item:selected { background: $selected; color: $text; }
@@ -99,6 +103,11 @@ QMainWindow::separator { background: $edge; width: 3px; height: 3px; }
 QPushButton, QToolButton { background: $surface; color: $text; border: 1px solid $edge; border-radius: 5px; padding: $tightpx $buttonpx; }
 QPushButton:hover, QToolButton:hover { background: $hover; }
 QToolButton:checked { background: $selected; color: $text; border-color: $focus; }
+QToolButton[role="propertySection"], QToolButton[role="propertySection"]:checked {
+    background: $panel; color: $text; border-color: $edge; font-weight: 600;
+}
+QToolButton[role="propertySection"]:hover { background: $hover; }
+QToolButton[role="propertySection"]:focus { border-color: $focus; }
 QPushButton:focus, QToolButton:focus, QLineEdit:focus { border: 1px solid $focus; }
 QPushButton:disabled, QToolButton:disabled { color: $disabled; background: $panel; border-color: $edge; }
 QPushButton[accent="true"] { color: #112322; background: $accent; border-color: $focus; font-weight: 650; }
@@ -106,15 +115,30 @@ QPushButton[accent="true"]:focus { border: 2px solid #18312d; padding: $pressedp
 QPushButton[accent="true"]:hover { background: $accentHover; }
 QLineEdit { background: $input; border: 1px solid $edge; padding: $smallpx; border-radius: 4px; }
 QDoubleSpinBox QLineEdit, QSpinBox QLineEdit { background: transparent; color: $text; border: 0; padding: 0; }
+QComboBox { background: $input; color: $text; border: 1px solid $edge; border-radius: 4px; padding: 2px $smallpx; }
+QComboBox:hover { border-color: $secondary; }
+QComboBox:disabled { color: $disabled; background: $panel; }
+QComboBox:focus, QCheckBox:focus { border: 1px solid $focus; }
+QCheckBox { border: 1px solid transparent; }
+QTreeWidget { background: $background; color: $text; border: 1px solid $edge; border-radius: 4px; }
+QTreeWidget:focus { border-color: $focus; }
+QTreeWidget::item { padding: 2px; }
+QTreeWidget::item:selected { background: $selected; color: $text; }
+QHeaderView::section { background: $panel; color: $secondary; padding: 3px; border: 0; border-bottom: 1px solid $edge; }
+QTabWidget::pane { border: 0; border-top: 1px solid $edge; }
+QTabBar::tab { padding: $smallpx $widepx; color: $secondary; background: $background; border-bottom: 2px solid transparent; }
+QTabBar::tab:selected { background: $panel; color: $text; border-bottom-color: $focus; }
+QTabBar::tab:hover { background: $hover; }
+QTabBar::tab:focus { border: 1px solid $focus; }
 QListWidget { background: $background; border: none; outline: 0; }
 QListWidget::item { padding: $rowpx $smallpx; border-radius: 4px; }
 QListWidget::item:selected { background: $selected; color: $text; }
 QListWidget::item:focus { border: 1px solid $focus; }
 QFrame#hubCard, QFrame#recentCard { border: 1px solid $edge; border-radius: 8px; background: $panel; }
 QLabel[role="minor"] { color: $secondary; }
-QLabel[role="section"] { font-size: $sectionpx; font-weight: 700; color: $secondary; }
-QLabel[role="hubTitle"] { font-size: $titlepx; font-weight: 650; }
-QLabel#brand { color: $focus; font-size: $brandpx; font-weight: 750; }
+QLabel[role="section"] { font-size: $sectionpt; font-weight: 700; color: $secondary; }
+QLabel[role="hubTitle"] { font-size: $titlept; font-weight: 650; }
+QLabel#brand { color: $focus; font-size: $brandpt; font-weight: 750; }
 QLabel#sceneHeading { font-weight: 650; }
 QLabel#warning, QLabel[role="warning"] { color: $warning; }
 QStatusBar { border-top: 1px solid $edge; }
@@ -127,7 +151,7 @@ QToolTip { color: $text; background: $surface; border: 1px solid $edge; padding:
         {"$focus",focus.name()},{"$selected",selected.name()},{"$hover",hover.name()},{"$warning",warning.name()},
         {"$small",scale(5)},{"$tight",scale(6)},{"$wide",scale(9)},{"$button",scale(11)},{"$row",scale(7)},
         {"$pressed",scale(6).toInt()>1 ? QString::number(scale(6).toInt()-1) : QString("1")},
-        {"$inset",QString::number(scale(11).toInt()-1)},{"$brand",scale(17)},{"$section",scale(11)},{"$title",scale(34)}
+        {"$inset",QString::number(scale(11).toInt()-1)},{"$brand",points(13)},{"$section",points(8.5)},{"$title",points(25.5)}
     };
     for (const auto& [token,value]:tokens) style.replace(token,value);
     app.setStyleSheet(style);

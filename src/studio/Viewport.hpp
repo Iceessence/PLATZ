@@ -52,6 +52,7 @@ private:
     std::unique_ptr<platz::engine::Renderer> renderer_;
     platz::engine::Camera camera_, authoringCamera_;
     std::vector<platz::engine::DrawObject> draws_;
+    bool idsChanged_{true};
     std::vector<std::string> ids_, displayedIds_;
     std::vector<std::string> pickIds_;
     std::optional<QPoint> queuedPick_;

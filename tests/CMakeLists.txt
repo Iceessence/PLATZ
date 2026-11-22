@@ -29,10 +29,11 @@ add_test(NAME studio_transform_200dpi COMMAND platz_studio_checks --gizmo-only)
 add_test(NAME studio_visible_drag_profile COMMAND platz_studio_checks --drag-profile --dense --gates)
 add_test(NAME studio_native_geometry COMMAND platz_studio_checks --native-mesh-only)
 add_test(NAME studio_native_images COMMAND platz_studio_checks --image-only)
+add_test(NAME studio_organization COMMAND platz_studio_checks --organization)
 add_test(NAME studio_workspaces COMMAND platz_studio_checks --workspaces)
 add_test(NAME studio_workspaces_highdpi COMMAND platz_studio_checks --workspaces --highdpi)
 set(studio_checks studio_edit_play_reopen studio_transform_highdpi studio_transform_200dpi studio_native_geometry studio_native_images
-    studio_workspaces studio_workspaces_highdpi)
+    studio_workspaces studio_workspaces_highdpi studio_organization)
 set_tests_properties(${studio_checks} PROPERTIES LABELS "hardware;interactive" TIMEOUT 90 RUN_SERIAL TRUE)
 set_tests_properties(${studio_checks} PROPERTIES
     ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
@@ -50,6 +51,12 @@ set_tests_properties(studio_visible_drag_profile PROPERTIES LABELS "hardware;int
     ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>;PATH=path_list_prepend:$<TARGET_FILE_DIR:platz_sdl3>")
 set_target_properties(platz_gpu_checks platz_studio_checks PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests/$<CONFIG>")
+add_executable(platz_organizer_drag_checks organizer_drag_checks.cpp)
+target_link_libraries(platz_organizer_drag_checks PRIVATE platz_studio Qt6::Test)
+set_target_properties(platz_organizer_drag_checks PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests/$<CONFIG>")
+add_test(NAME studio_organizer_drag COMMAND platz_organizer_drag_checks)
+set_tests_properties(studio_organizer_drag PROPERTIES TIMEOUT 30 LABELS "interactive" RUN_SERIAL TRUE
+    ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>;PATH=path_list_prepend:$<TARGET_FILE_DIR:platz_sdl3>")
 add_executable(platz_process_checks process_checks.cpp)
 target_link_libraries(platz_process_checks PRIVATE platz_core Qt6::Core ole32 oleaut32 uiautomationcore)
 set_target_properties(platz_process_checks PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests/$<CONFIG>")

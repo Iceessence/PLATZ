@@ -1,4 +1,6 @@
 #include "StudioWindow.hpp"
+#include "OrganizerTree.hpp"
+#include <QStyle>
 #include "Viewport.hpp"
 #include <QAction>
 #include <QDockWidget>
@@ -17,8 +19,7 @@
 
 namespace {
 QString pickGlb(QWidget* parent, const QString& title) {
-    return QFileDialog::getOpenFileName(parent,title,{},QObject::tr("Binary glTF (*.glb)"),nullptr,
-                                       QFileDialog::DontUseNativeDialog);
+    return QFileDialog::getOpenFileName(parent,title,{},QObject::tr("Binary glTF (*.glb)"));
 }
 }
 
@@ -29,12 +30,16 @@ void StudioWindow::buildAssets() {
     auto* layout=new QVBoxLayout(panel);
     layout->setContentsMargins(8,8,8,8);
     layout->setSpacing(6);
-    assetList_=new QTreeWidget;
+    assetList_=new OrganizerTree(StudioOrganization::Kind::Meshes,[this]{return organization_.get();},
+                                 [this]{return project_ && !runtime_;});
+    layout->addWidget(assetList_->makeControls(panel));
+    assetList_->onOrganizationChanged=[this]{
+        refreshAssets();
+        if (!preview_) syncInspector();
+    };
     assetList_->setObjectName("meshLibrary");
     assetList_->setAccessibleName(tr("Project mesh assets"));
     assetList_->setHeaderLabels({tr("Mesh"),tr("Uses")});
-    assetList_->setRootIsDecorated(false);
-    assetList_->setItemsExpandable(false);
     assetList_->setUniformRowHeights(true);
     assetList_->header()->setStretchLastSection(false);
     assetList_->header()->setSectionResizeMode(0,QHeaderView::Stretch);
@@ -47,7 +52,7 @@ void StudioWindow::buildAssets() {
     importAsset_=new QPushButton(tr("Import…"));
     importAsset_->setObjectName("importMeshAsset");
     importAsset_->setAccessibleName(tr("Import GLB into asset library"));
-    placeAsset_=new QPushButton(tr("Add instance"));
+    placeAsset_=new QPushButton(tr("Place in scene"));
     placeAsset_->setObjectName("placeMeshAsset");
     manageAsset_=new QPushButton(tr("Manage"));
     manageAsset_->setAccessibleName(tr("Manage selected mesh asset"));
@@ -94,21 +99,31 @@ void StudioWindow::buildAssets() {
 
     auto* menu=new QMenu(manageAsset_);
     manageAsset_->setMenu(menu);
+    menu->addSection(tr("Mesh source"));
     editMesh_=menu->addAction(tr("Edit mesh parameters…"),this,[this]{editNativeMesh(selectedAsset());});
     editMesh_->setObjectName("editNativeMesh");
     auto* rename=menu->addAction(tr("Rename asset…"),this,[this]{nameMesh(selectedAsset(),false);});
     rename->setObjectName("renameMeshAsset");
     copyMesh_=menu->addAction(tr("Duplicate native mesh…"),this,[this]{nameMesh(selectedAsset(),true);});
     copyMesh_->setObjectName("duplicateNativeMesh");
-    detachMesh_=menu->addAction(tr("Make selected instance unique…"),this,[this]{nameMesh(selectedAsset(),true,selected_);});
-    detachMesh_->setObjectName("detachNativeMesh");
-    menu->addSeparator();
     auto* saveSource=menu->addAction(tr("Export GLB…"),this,[this]{
         if (!project_ || runtime_) return;
         const auto asset=project_->meshLibrary().find(selectedAsset());
         if (asset!=project_->meshLibrary().end()) writeGlbSource(asset->second.asset.data,asset->second.native.has_value());
     });
     saveSource->setObjectName("saveLibraryGlb");
+    removeAsset_=menu->addAction(tr("Remove unused mesh"),this,[this]{
+        if (!project_ || runtime_ || selectedAsset().empty()) return;
+        protectedCall([&]{
+            project_->removeMeshAsset(selectedAsset(),project_->revision());
+            refresh();
+            notify(tr("Removed the unused mesh. Undo restores it."));
+        });
+    });
+    removeAsset_->setObjectName("removeMeshAsset");
+    menu->addSection(tr("Scene instances"));
+    detachMesh_=menu->addAction(tr("Make selected instance unique…"),this,[this]{nameMesh(selectedAsset(),true,selected_);});
+    detachMesh_->setObjectName("detachNativeMesh");
     replaceInstances_=menu->addAction(tr("Replace all instances from GLB…"),this,[this]{
         if (!project_ || runtime_ || selectedAsset().empty()) return;
         const auto digest=selectedAsset();
@@ -123,15 +138,13 @@ void StudioWindow::buildAssets() {
         });
     });
     replaceInstances_->setObjectName("replaceMeshInstances");
-    removeAsset_=menu->addAction(tr("Remove unused mesh"),this,[this]{
-        if (!project_ || runtime_ || selectedAsset().empty()) return;
-        protectedCall([&]{
-            project_->removeMeshAsset(selectedAsset(),project_->revision());
-            refresh();
-            notify(tr("Removed the unused mesh. Undo restores it."));
-        });
-    });
-    removeAsset_->setObjectName("removeMeshAsset");
+    assetList_->appendContextActions=[this,menu](QMenu& context){
+        auto* place=context.addAction(placeAsset_->text(),placeAsset_,&QPushButton::click);
+        place->setEnabled(placeAsset_->isEnabled());
+        auto* assign=context.addAction(assignAsset_->text(),assignAsset_,&QPushButton::click);
+        assign->setEnabled(assignAsset_->isEnabled());
+        if (manageAsset_->isEnabled()) context.addActions(menu->actions());
+    };
     connect(assetList_,&QTreeWidget::itemDoubleClicked,this,[this]{
         if (editMesh_->isEnabled()) editMesh_->trigger();
     });
@@ -145,23 +158,19 @@ void StudioWindow::buildAssets() {
 }
 
 std::string StudioWindow::selectedAsset() const {
-    const auto items=assetList_->selectedItems();
-    const auto* item=items.isEmpty() ? nullptr : items.front();
-    return item ? item->data(0,Qt::UserRole).toString().toStdString() : std::string{};
+    return assetList_->selectedSource().toStdString();
 }
 
 void StudioWindow::refreshAssets(const std::string& preferred) {
-    const auto selected=preferred.empty() ? selectedAsset() : preferred;
     const QSignalBlocker block(assetList_);
-    assetList_->clear();
+    assetList_->beginRefresh();
     if (project_) {
         std::map<std::string_view,int> uses;
         for (const auto& object : project_->objects())
             if (object.asset.data) ++uses[object.asset.key()];
         for (const auto& [key,mesh] : project_->meshLibrary()) {
-            auto* item=new QTreeWidgetItem(assetList_);
-            item->setText(0,QString::fromStdString(mesh.name));
-            item->setData(0,Qt::UserRole,QString::fromStdString(key));
+            auto* item=assetList_->addSource(QString::fromStdString(key),QString::fromStdString(mesh.name));
+            item->setIcon(0,style()->standardIcon(mesh.native ? QStyle::SP_FileDialogDetailedView : QStyle::SP_FileIcon));
             item->setData(1,Qt::DisplayRole,uses[key]);
             item->setTextAlignment(1,Qt::AlignRight|Qt::AlignVCenter);
             item->setToolTip(0,tr("%1 vertices · %2 triangles · %3 material slots\n%4")
@@ -170,20 +179,19 @@ void StudioWindow::refreshAssets(const std::string& preferred) {
                 .arg(mesh.native ? tr("Editable %1 · %2").arg(QString::fromUtf8(platz::nativeShapeName(mesh.native->shape)),
                                                               QString::fromStdString(key)) :
                                    tr("Imported GLB · SHA-256 %1").arg(QString::fromStdString(key))));
-            if (key==selected) assetList_->setCurrentItem(item);
         }
-        assetList_->sortItems(0,Qt::AscendingOrder);
-        if (!assetList_->currentItem() && assetList_->topLevelItemCount())
-            assetList_->setCurrentItem(assetList_->topLevelItem(0));
     }
+    assetList_->endRefresh(QString::fromStdString(preferred));
+    if (!preferred.empty()) assetList_->revealSource(QString::fromStdString(preferred));
     updateAssetActions();
     refreshImages();
 }
 
 void StudioWindow::updateAssetActions() {
     const bool editable=project_ && !runtime_;
-    const auto* item=assetList_->currentItem();
-    const bool hasMesh=editable && item;
+    const auto selectedRows=assetList_->selectedItems();
+    const auto* item=selectedRows.isEmpty() ? nullptr : selectedRows.front();
+    const bool hasMesh=editable && item && project_->meshLibrary().contains(selectedAsset());
     const auto* object=hasMesh ? project_->find(selected_) : nullptr;
     const auto key=selectedAsset();
     const auto* library=hasMesh ? &project_->meshLibrary() : nullptr;

@@ -1,6 +1,7 @@
 #include "StudioWindow.hpp"
 #include "Appearance.hpp"
 #include "Viewport.hpp"
+#include "OrganizerTree.hpp"
 #include <QColorDialog>
 #include <QCheckBox>
 #include <QComboBox>
@@ -25,6 +26,7 @@
 #include <QStatusBar>
 #include <QSaveFile>
 #include <QToolBar>
+#include <QToolButton>
 #include <QTreeWidget>
 #include <algorithm>
 #include <cmath>
@@ -197,6 +199,10 @@ void StudioWindow::buildStudio() {
     auto* spring = new QWidget;
     spring->setSizePolicy(QSizePolicy::Expanding,QSizePolicy::Preferred);
     tools_->addWidget(spring);
+    auto* search=button(tr("Search Studio…"),"studioSearchButton");
+    search->setToolTip(tr("Find a command, scene object or asset (Ctrl+K)"));
+    connect(search,&QPushButton::clicked,this,[this]{searchCommandsAction_->trigger();});
+    tools_->addWidget(search);
     save_ = button(tr("Save"),"saveButton");
     save_->setToolTip(tr("Save authoring revision (Ctrl+S)"));
     play_ = button(tr("Play"),"playButton");
@@ -252,23 +258,35 @@ void StudioWindow::buildStudio() {
     count_ = label({},"section");
     count_->setContentsMargins(4,0,0,2);
     left->addWidget(count_);
-    tree_ = new QListWidget;
+    tree_=new OrganizerTree(StudioOrganization::Kind::Scene,[this]{return organization_.get();},
+                            [this]{return project_ && !runtime_;},side);
+    tree_->onOrganizationChanged=[this]{
+        refreshSceneTree();
+        const auto id=tree_->selectedSource().toStdString();
+        if (id!=selected_) select(id,false);
+    };
+    left->addWidget(tree_->makeControls(side));
     tree_->setObjectName("sceneTree");
     tree_->setAccessibleName(tr("Scene objects"));
     tree_->setIconSize(QSize(19,19));
     left->addWidget(tree_,1);
     add_ = button(tr("+   Add object"),"addObject");
     auto* choices = new QMenu(add_);
-    for (auto mesh : {platz::Mesh::Cube,platz::Mesh::Sphere,platz::Mesh::Cylinder}) {
-        choices->addAction(QString::fromUtf8(platz::meshName(mesh)),this,[this,mesh]{
+    for (auto shape : {platz::NativeShape::Cube,platz::NativeShape::Sphere,platz::NativeShape::Cylinder}) {
+        choices->addAction(QString::fromUtf8(platz::nativeShapeName(shape)),this,[this,shape]{
             if (runtime_ || !project_) return;
-            protectedCall([&]{selected_=project_->add(mesh); refresh();});
+            protectedCall([&]{
+                const auto result=project_->createNativeMesh(platz::nativeShapeName(shape),platz::defaultNativeMesh(shape),
+                                                            true,project_->revision());
+                selected_=result.objectId;
+                refresh(result.key);
+            });
         });
     }
     choices->addSeparator();
     auto* import=choices->addAction(tr("Import mesh from GLB…"),this,[this]{
         if (!project_ || runtime_) return;
-        auto path=QFileDialog::getOpenFileName(this,tr("Import mesh geometry"),{},tr("Binary glTF mesh (*.glb)"),nullptr,QFileDialog::DontUseNativeDialog);
+        auto path=QFileDialog::getOpenFileName(this,tr("Import mesh geometry"),{},tr("Binary glTF mesh (*.glb)"));
         if (!path.isEmpty()) protectedCall([&]{
             selected_=project_->importMesh(path.toStdWString(),project_->revision());
             refresh(project_->find(selected_)->asset.data->digest());
@@ -280,13 +298,12 @@ void StudioWindow::buildStudio() {
     import->setToolTip(tr("One indexed triangle primitive, up to 2 MiB. Imports local positions and normals."));
     add_->setMenu(choices);
     left->addWidget(add_);
-    sceneDock_->setMinimumWidth(152);
+    sceneDock_->setMinimumWidth(186);
     sceneDock_->setWidget(side);
     addDockWidget(Qt::LeftDockWidgetArea,sceneDock_);
-    connect(tree_,&QListWidget::itemSelectionChanged,this,[this]{
+    connect(tree_,&QTreeWidget::itemSelectionChanged,this,[this]{
         if (refreshing_) return;
-        const auto items=tree_->selectedItems();
-        const auto id=items.isEmpty() ? std::string{} : items.front()->data(Qt::UserRole).toString().toStdString();
+        const auto id=tree_->selectedSource().toStdString();
         if (id!=selected_) select(id,false);
     });
     buildInspector();
@@ -312,27 +329,63 @@ void StudioWindow::buildInspector() {
     auto* box = new QVBoxLayout(inspector_);
     box->setContentsMargins(14,12,14,12);
     box->setSpacing(7);
-    box->addWidget(label(tr("OBJECT"),"section"));
+    inspectorEmpty_=label(tr("Select an object in Scene or the viewport to see its properties."),"minor");
+    inspectorEmpty_->setObjectName("inspectorEmpty");
+    inspectorEmpty_->setWordWrap(true);
+    box->addWidget(inspectorEmpty_);
+    inspectorDetails_=new QWidget;
+    auto* details=new QVBoxLayout(inspectorDetails_);
+    details->setContentsMargins(0,0,0,0);
+    details->setSpacing(7);
+    box->addWidget(inspectorDetails_);
+    auto propertySection=[&](const QString& title,const char* id) {
+        auto* toggle=new QToolButton;
+        toggle->setObjectName(id);
+        toggle->setText(title);
+        toggle->setAccessibleName(title);
+        toggle->setProperty("role","propertySection");
+        toggle->setCheckable(true);
+        toggle->setChecked(true);
+        toggle->setArrowType(Qt::DownArrow);
+        toggle->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+        toggle->setSizePolicy(QSizePolicy::Expanding,QSizePolicy::Preferred);
+        details->addWidget(toggle);
+        auto* content=new QWidget;
+        auto* sectionLayout=new QVBoxLayout(content);
+        sectionLayout->setContentsMargins(2,0,2,3);
+        sectionLayout->setSpacing(7);
+        details->addWidget(content);
+        connect(toggle,&QToolButton::toggled,content,[toggle,content](bool expanded){
+            toggle->setArrowType(expanded ? Qt::DownArrow : Qt::RightArrow);
+            content->setVisible(expanded);
+        });
+        return sectionLayout;
+    };
+    details->addWidget(label(tr("Object name"),"section"));
     name_=new QLineEdit;
     name_->setMaxLength(240);
     name_->setAccessibleName(tr("Object name"));
     name_->setObjectName("objectName");
-    box->addWidget(name_);
+    details->addWidget(name_);
+    auto* transformBox=propertySection(tr("Transform"),"inspectorTransformToggle");
+    auto* meshBox=propertySection(tr("Mesh"),"inspectorMeshToggle");
+    buildInspectorSources(*meshBox);
     mesh_=label({},"minor");
-    box->addWidget(mesh_);
+    meshBox->addWidget(mesh_);
     saveGlb_=button(tr("Save original GLB…"),"saveEmbeddedGlb");
     saveGlb_->setToolTip(tr("Save the embedded source bytes. Scene transforms and PLATZ colors belong to the project."));
     saveGlb_->hide();
-    box->addWidget(saveGlb_,0,Qt::AlignLeft);
+    meshBox->addWidget(saveGlb_,0,Qt::AlignLeft);
     connect(saveGlb_,&QPushButton::clicked,this,&StudioWindow::saveEmbeddedGlb);
     locateMesh_=button({},"locateMeshSource");
     locateMesh_->hide();
-    box->addWidget(locateMesh_,0,Qt::AlignLeft);
+    meshBox->addWidget(locateMesh_,0,Qt::AlignLeft);
     connect(locateMesh_,&QPushButton::clicked,this,[this]{
         const auto* object=project_ ? project_->find(selected_) : nullptr;
         if (!object || !object->asset.data || runtime_) return;
         assetsDock_->show();
-        refreshAssets(std::string(object->asset.key()));
+        assetTabs_->setCurrentIndex(0);
+        assetList_->revealSource(QString::fromStdString(std::string(object->asset.key())));
         assetList_->setFocus();
     });
     connect(name_,&QLineEdit::editingFinished,this,[this]{
@@ -340,14 +393,13 @@ void StudioWindow::buildInspector() {
     });
     connect(name_,&QLineEdit::textEdited,this,[this]{syncSaveState();});
 
-    section(box,tr("TRANSFORM"));
     const std::array<QString,3> groups{tr("Position"),tr("Rotation"),tr("Scale")};
     const std::array<QString,3> fieldIds{"position","rotation","scale"};
     const std::array<QString,3> units{"m","°","×"};
     const std::array<QString,3> axes{"X","Y","Z"};
     for (int group=0;group<3;++group) {
         auto* header = label(groups[group] + "  ·  " + units[group],"minor");
-        box->addWidget(header);
+        transformBox->addWidget(header);
         auto* row = new QHBoxLayout;
         row->setSpacing(4);
         for (int coordinate=0;coordinate<3;++coordinate) {
@@ -417,11 +469,20 @@ void StudioWindow::buildInspector() {
             });
             connect(field,&QDoubleSpinBox::editingFinished,this,[this,field]{finishFieldPreview(field);});
         }
-        box->addLayout(row);
+        transformBox->addLayout(row);
     }
-    auto* materialHeading=label(tr("MATERIAL"),"section");
-    materialHeading->setObjectName("materialHeading");
-    box->addWidget(materialHeading);
+    auto* materialBox=propertySection(tr("Material overrides"),"inspectorMaterialToggle");
+    auto* scope=label(tr("Changes here apply to this instance."),"minor");
+    scope->setWordWrap(true);
+    materialBox->addWidget(scope);
+    appearanceSource_=new QToolButton;
+    appearanceSource_->setText(tr("Copy appearance from"));
+    appearanceSource_->setObjectName("copyAppearance");
+    appearanceSource_->setPopupMode(QToolButton::InstantPopup);
+    appearanceSource_->setMenu(new QMenu(appearanceSource_));
+    connect(appearanceSource_->menu(),&QMenu::aboutToShow,this,&StudioWindow::populateAppearanceSources);
+    appearanceSource_->setToolTip(tr("Copy a color and compatible texture assignment from another object."));
+    materialBox->addWidget(appearanceSource_,0,Qt::AlignLeft);
     auto* slotControls=new QHBoxLayout;
     materialSlot_=new QComboBox;
     materialSlot_->setObjectName("materialSlot");
@@ -433,7 +494,7 @@ void StudioWindow::buildInspector() {
     resetSlot_->setAccessibleName(tr("Reset material slot color"));
     resetSlot_->setToolTip(tr("Restore the source color for this slot."));
     slotControls->addWidget(resetSlot_);
-    box->addLayout(slotControls);
+    materialBox->addLayout(slotControls);
     connect(materialSlot_,&QComboBox::currentIndexChanged,this,[this]{
         if (!refreshing_ && project_ && !runtime_) {
             cancelPreview();
@@ -447,20 +508,20 @@ void StudioWindow::buildInspector() {
     useTexture_=new QCheckBox(tr("Use imported texture"));
     useTexture_->setObjectName("useBaseColorTexture");
     useTexture_->setToolTip(tr("Use the embedded base-color texture for this material slot."));
-    box->addWidget(useTexture_);
+    materialBox->addWidget(useTexture_);
     textureInfo_=label({},"minor");
     textureInfo_->setObjectName("baseColorTextureInfo");
     textureInfo_->setWordWrap(true);
-    box->addWidget(textureInfo_);
+    materialBox->addWidget(textureInfo_);
     imageSlot_=new QComboBox;
     imageSlot_->setObjectName("baseColorImage");
     imageSlot_->setAccessibleName(tr("Project image for selected material slot"));
     imageSlot_->setToolTip(tr("Assign a project image to this material slot. Default restores the slot's existing texture setting."));
     imageSlot_->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
     imageSlot_->setMinimumContentsLength(12);
-    box->addWidget(imageSlot_);
+    materialBox->addWidget(imageSlot_);
     locateImage_=button(tr("Locate image source"),"locateImageSource");
-    box->addWidget(locateImage_,0,Qt::AlignLeft);
+    materialBox->addWidget(locateImage_,0,Qt::AlignLeft);
     connect(imageSlot_,&QComboBox::currentIndexChanged,this,[this](int row){
         if (refreshing_ || row<0) return;
         if (const auto target=currentImageTarget()) protectedCall([&]{
@@ -468,6 +529,14 @@ void StudioWindow::buildInspector() {
             refresh();
             notify(tr("Updated the material image assignment."));
         });
+    });
+    makeImageUnique_=button(tr("Make image unique…"),"makeInspectorImageUnique");
+    makeImageUnique_->setToolTip(tr("Copy this image and assign the copy to this object’s current material slot."));
+    materialBox->addWidget(makeImageUnique_,0,Qt::AlignLeft);
+    connect(makeImageUnique_,&QPushButton::clicked,this,[this]{
+        if (const auto target=currentImageTarget())
+            if (const auto* image=platz::slotImage(project_->find(target->objectId)->images,target->slot))
+                nameImage(image->imageId,true,target);
     });
     connect(locateImage_,&QPushButton::clicked,this,[this]{
         if (const auto target=currentImageTarget())
@@ -478,7 +547,7 @@ void StudioWindow::buildInspector() {
         const auto slot=materialSlot_->currentIndex();
         if (slot>=0) applyEdit([slot,enabled](platz::Object& object){object.setTextureEnabled(slot,enabled);});
     });
-    box->addWidget(label(tr("Base color  ·  sRGB"),"minor"));
+    materialBox->addWidget(label(tr("Base color  ·  sRGB"),"minor"));
     auto* material = new QHBoxLayout;
     swatch_=button({},"colorPicker");
     swatch_->setAccessibleName(tr("Choose base color"));
@@ -490,7 +559,7 @@ void StudioWindow::buildInspector() {
     color_->setMaxLength(7);
     material->addWidget(swatch_);
     material->addWidget(color_,1);
-    box->addLayout(material);
+    materialBox->addLayout(material);
     connect(color_,&QLineEdit::textEdited,this,[this](const QString& text){
         previewColor(color_,text.size()==7 && text.startsWith('#') ? QColor(text) : QColor());
     });
@@ -506,12 +575,24 @@ void StudioWindow::buildInspector() {
             finishFieldPreview(swatch_);
         } else if (previewEditor_==swatch_) finishPreview(false);
     });
-    section(box,tr("SOURCE ID"));
+    auto* metadata=new QToolButton;
+    metadata->setObjectName("toggleObjectId");
+    metadata->setText(tr("Object ID"));
+    metadata->setCheckable(true);
+    metadata->setArrowType(Qt::RightArrow);
+    metadata->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    metadata->setToolTip(tr("Show the stable identifier for this scene object"));
+    details->addWidget(metadata,0,Qt::AlignLeft);
     identity_=label({},"minor");
     identity_->setObjectName("objectIdentity");
     identity_->setTextInteractionFlags(Qt::TextSelectableByMouse|Qt::TextSelectableByKeyboard);
     identity_->setWordWrap(true);
-    box->addWidget(identity_);
+    identity_->hide();
+    connect(metadata,&QToolButton::toggled,this,[this,metadata](bool expanded){
+        metadata->setArrowType(expanded ? Qt::DownArrow : Qt::RightArrow);
+        identity_->setVisible(expanded);
+    });
+    details->addWidget(identity_);
     box->addStretch();
     scroll->setWidget(inspector_);
     inspectorDock_->setWidget(scroll);
@@ -527,7 +608,6 @@ void StudioWindow::saveEmbeddedGlb() {
 
 void StudioWindow::writeGlbSource(std::shared_ptr<const platz::MeshAsset> source,bool native) {
     QFileDialog dialog(this,native ? tr("Export mesh GLB") : tr("Save original GLB"),{},tr("Binary glTF (*.glb)"));
-    dialog.setOption(QFileDialog::DontUseNativeDialog);
     dialog.setAcceptMode(QFileDialog::AcceptSave);
     dialog.setDefaultSuffix("glb");
     if (dialog.exec()!=QDialog::Accepted) return;

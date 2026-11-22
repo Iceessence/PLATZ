@@ -24,6 +24,7 @@
 #include <QMouseEvent>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QProcess>
 #include <QSettings>
 #include <QScreen>
 #include <QTemporaryDir>
@@ -58,6 +59,172 @@ T* control(QWidget& window, const char* name) {
     auto* value = window.findChild<T*>(QLatin1String(name));
     if (!value) throw std::runtime_error(std::string("Missing Studio control: ") + name);
     return value;
+}
+
+void expose(StudioWindow& window);
+
+void selectSceneRow(QTreeWidget* scene, int row) {
+    auto* item=scene->topLevelItem(row);
+    check(item && !item->data(0,Qt::UserRole).toString().isEmpty(),"Expected a scene object row");
+    scene->setCurrentItem(item);
+}
+
+QTreeWidgetItem* rowNamed(QTreeWidget* tree,const QString& name) {
+    const auto rows=tree->findItems(name,Qt::MatchExactly|Qt::MatchRecursive,0);
+    if (rows.size()!=1) throw std::runtime_error(("Expected one tree row called "+name).toStdString());
+    return rows.front();
+}
+
+void respondToCommand(QAction* action,const std::function<void(QDialog&)>& respond) {
+    check(action && action->isEnabled(),"Expected an enabled Studio command");
+    bool answered=false;
+    std::exception_ptr failure;
+    QTimer timer;
+    QObject::connect(&timer,&QTimer::timeout,[&] {
+        auto* modal=qobject_cast<QDialog*>(QApplication::activeModalWidget());
+        if (!modal) return;
+        timer.stop();
+        answered=true;
+        try { respond(*modal); }
+        catch (...) {failure=std::current_exception(); modal->reject();}
+    });
+    timer.start(20);
+    action->trigger();
+    if (failure) std::rethrow_exception(failure);
+    check(answered,"Studio command did not open its dialog");
+}
+
+void nameViaDialog(QAction* action,const QString& name) {
+    respondToCommand(action,[&](QDialog& dialog) {
+        auto* input=qobject_cast<QInputDialog*>(&dialog);
+        check(input,"Expected the folder naming dialog");
+        input->setTextValue(name);
+        input->accept();
+    });
+}
+
+struct FolderCase { const char* tree; const char* prefix; const char* item; };
+constexpr FolderCase folders[]={{"sceneTree","scene","Block"},{"meshLibrary","mesh","Source geometry"},
+                                {"imageLibrary","image","Source pixels"}};
+
+void openFolderPane(StudioWindow& window,const FolderCase& entry) {
+    if (entry.prefix==std::string_view("scene")) return;
+    auto* dock=control<QDockWidget>(window,"assetsDock");
+    dock->show();
+    control<QTabWidget>(window,"assetTabs")->setCurrentIndex(entry.prefix==std::string_view("mesh") ? 0 : 1);
+}
+
+void saveStudioEvidence(StudioWindow& window,const QString& destination,const QString& filename) {
+    if (destination.isEmpty()) return;
+    check(QDir().mkpath(destination),"Could not create the requested screenshot directory");
+    window.raise();
+    window.activateWindow();
+    check(QTest::qWaitForWindowActive(&window),"Cannot capture the active Studio window");
+    QApplication::processEvents();
+    QTest::qWait(180);
+    const auto shot=window.screen()->grabWindow(window.winId());
+    check(!shot.isNull() && shot.save(QDir(destination).filePath(filename)),"Studio screenshot was not saved");
+}
+
+void checkSavedFolders(const QString& path,const QStringList& ids) {
+    check(ids.size()==3,"Expected one folder identity per Studio panel");
+    StudioWindow window;
+    expose(window);
+    check(window.openProject(path),"Failed to reopen organized project");
+    for (int i=0;i<3;++i) {
+        const auto& item=folders[i];
+        openFolderPane(window,item);
+        auto* tree=control<QTreeWidget>(window,item.tree);
+        auto* source=rowNamed(tree,item.item);
+        auto* parent=source->parent();
+        check(parent && parent->text(0)=="Keep" && parent->data(0,Qt::UserRole+1).toString()==ids[i] &&
+              parent->data(0,Qt::UserRole).toString().isEmpty(),
+              "Relaunch lost the folder identity or source membership");
+    }
+    check(window.close(),"Restored organized project failed to close");
+}
+
+void exerciseOrganization(const QString& path,const QString& settingsDir,const QString& evidenceDir) {
+    auto project=platz::Project::create(path.toStdWString(),"Folder qualification");
+    project.createNativeMesh("Source geometry",platz::defaultNativeMesh(platz::NativeShape::Cylinder),false,project.revision());
+    project.createImage("Source pixels",platz::RasterImage::create(1,1,{35,90,130,255}),{},project.revision());
+    project.save();
+    auto hash=[&] {
+        QFile file(path);
+        check(file.open(QIODevice::ReadOnly),"Failed to hash the folder test project");
+        return QCryptographicHash::hash(file.readAll(),QCryptographicHash::Sha256);
+    };
+    const auto original=hash();
+    QStringList ids;
+    {
+        StudioWindow window;
+        expose(window);
+        if (!evidenceDir.isEmpty()) window.resize(1520,970);
+        check(window.openProject(path),"Could not open folder test project");
+        for (const auto& entry : folders) {
+            openFolderPane(window,entry);
+            auto* tree=control<QTreeWidget>(window,entry.tree);
+            const QByteArray prefix(entry.prefix);
+            auto* create=control<QAction>(window,(prefix+"NewFolder").constData());
+            auto* move=control<QAction>(window,(prefix+"MoveToFolder").constData());
+            auto* rename=control<QAction>(window,(prefix+"RenameFolder").constData());
+            auto* remove=control<QAction>(window,(prefix+"RemoveFolder").constData());
+            const auto id=rowNamed(tree,entry.item)->data(0,Qt::UserRole);
+            tree->setCurrentItem(rowNamed(tree,entry.item));
+            nameViaDialog(create,"Temporary name");
+            tree->setCurrentItem(rowNamed(tree,"Temporary name"));
+            nameViaDialog(rename,"Keep");
+            auto* folder=rowNamed(tree,"Keep");
+            ids.append(folder->data(0,Qt::UserRole+1).toString());
+            check(!ids.back().isEmpty(),"Folder has no stable presentation identity");
+            tree->setCurrentItem(rowNamed(tree,entry.item));
+            respondToCommand(move,[&](QDialog& dialog){
+                auto* choices=control<QTreeWidget>(dialog,"folderDestination");
+                choices->setCurrentItem(rowNamed(choices,"Keep"));
+                dialog.accept();
+            });
+            auto* source=rowNamed(tree,entry.item);
+            check(source->parent()==rowNamed(tree,"Keep") && source->data(0,Qt::UserRole)==id,
+                  "Moving a source to a folder changed its identity or its destination");
+            auto* filter=control<QLineEdit>(window,(prefix+"Search").constData());
+            filter->setText("nothing-matches-this");
+            check(source->isHidden() || source->parent()->isHidden(),"Search kept an unrelated source visible");
+            filter->setText(entry.item);
+            source=rowNamed(tree,entry.item);
+            check(!source->isHidden() && !source->parent()->isHidden(),"Filtered hierarchy hid a matching source");
+            filter->clear();
+            tree->setCurrentItem(rowNamed(tree,"Keep"));
+            check(!remove->isEnabled(),"A populated folder offered empty-folder removal");
+            if (entry.prefix==std::string_view("scene")) {
+                check(control<QLabel>(window,"inspectorEmpty")->isVisible() &&
+                      !control<QLineEdit>(window,"objectName")->isVisible(),
+                      "A Scene folder inherited the prior object's Inspector");
+            }
+            nameViaDialog(create,"Nested");
+            check(rowNamed(tree,"Nested")->parent()==rowNamed(tree,"Keep"),"New nested folder appeared at the root");
+            if (!evidenceDir.isEmpty()) {
+                rowNamed(tree,"Keep")->setExpanded(true);
+                tree->setCurrentItem(rowNamed(tree,entry.item));
+                saveStudioEvidence(window,evidenceDir,QString::fromLatin1(entry.prefix)+"-folders.png");
+            }
+            tree->setCurrentItem(rowNamed(tree,"Nested"));
+            // Removal of an empty folder only changes personal organization.
+            remove->trigger();
+            check(tree->findItems("Nested",Qt::MatchExactly|Qt::MatchRecursive).isEmpty(),"Empty folder was not removed");
+        }
+        check(hash()==original && !control<QPushButton>(window,"saveButton")->isEnabled(),
+              "Personal organization dirtied or altered the project source");
+        check(window.close(),"Organized project did not close cleanly");
+    }
+    QSettings().sync();
+    QProcess child;
+    QStringList args{"--organization-reopen",path,settingsDir};
+    child.start(QCoreApplication::applicationFilePath(),args+ids);
+    check(child.waitForStarted(5000) && child.waitForFinished(25000),"Folder restart process did not complete");
+    if (child.exitCode()!=0) throw std::runtime_error(child.readAllStandardError().toStdString());
+    check(child.exitStatus()==QProcess::NormalExit && hash()==original,
+          "Reopening organized sources changed the portable project");
+    std::cout<<"Three panel folders, nested creation, move, relabel, removal, search and restart passed\n";
 }
 
 Capture settledFrame(Viewport& viewport) {
@@ -167,10 +334,10 @@ void profileViewportDrag(StudioTestApplication& app,QTemporaryDir& dir,bool dens
     const auto opened=window.openProject(path);
     check(opened,"Could not open drag profile copy");
     auto* view=static_cast<Viewport*>(control<QWidget>(window,"viewport"));
-    auto* tree=control<QListWidget>(window,"sceneTree");
-    std::cout << "Scene objects " << tree->count() << '\n';
-    for (int row=0;row<tree->count();++row)
-        if (tree->item(row)->text()=="Silver block") tree->setCurrentRow(row);
+    auto* tree=control<QTreeWidget>(window,"sceneTree");
+    std::cout << "Scene objects " << tree->topLevelItemCount() << '\n';
+    for (int row=0;row<tree->topLevelItemCount();++row)
+        if (tree->topLevelItem(row)->text(0)=="Silver block") selectSceneRow(tree,row);
     QTest::keyClick(view,Qt::Key_2);
     const auto summary=[](const char* label,std::vector<double> values) {
         check(!values.empty(),"Drag profile did not collect a required timing sample");
@@ -238,7 +405,7 @@ void profileViewportDrag(StudioTestApplication& app,QTemporaryDir& dir,bool dens
     }
     QTest::keyClick(view,Qt::Key_1);
     const auto frame=settledFrame(*view);
-    const auto silver=tree->currentRow();
+    const auto silver=tree->indexOfTopLevelItem(tree->currentItem());
     const auto hit=visiblePoint(frame,silver+1,*view);
     const auto empty=visiblePoint(frame,0,*view);
     std::vector<double> clickDispatch, clickResult;
@@ -250,7 +417,7 @@ void profileViewportDrag(StudioTestApplication& app,QTemporaryDir& dir,bool dens
         clickDispatch.push_back(std::chrono::duration<double,std::milli>(Clock::now()-start).count());
         while (view->selectionPending() && Clock::now()-start<std::chrono::milliseconds(100))
             QApplication::processEvents();
-        check(!view->selectionPending() && tree->currentRow()==(i%2==0 ? -1 : silver),"Visible click selected the wrong ID");
+        check(!view->selectionPending() && tree->indexOfTopLevelItem(tree->currentItem())==(i%2==0 ? -1 : silver),"Visible click selected the wrong ID");
         clickResult.push_back(std::chrono::duration<double,std::milli>(Clock::now()-start).count());
     }
     const auto dispatch=summary("Click dispatch (100 selected/background hits)",clickDispatch);
@@ -266,9 +433,9 @@ void captureTransformEvidence(QTemporaryDir& dir,const QString& destination) {
     expose(window);
     check(window.openProject(path),"Cannot open screenshot project");
     auto* view=static_cast<Viewport*>(control<QWidget>(window,"viewport"));
-    auto* tree=control<QListWidget>(window,"sceneTree");
-    for (int row=0;row<tree->count();++row)
-        if (tree->item(row)->text()=="Silver block") tree->setCurrentRow(row);
+    auto* tree=control<QTreeWidget>(window,"sceneTree");
+    for (int row=0;row<tree->topLevelItemCount();++row)
+        if (tree->topLevelItem(row)->text(0)=="Silver block") selectSceneRow(tree,row);
     check(QDir().mkpath(destination),"Cannot create screenshot directory");
     const std::array keys{Qt::Key_2,Qt::Key_3,Qt::Key_4};
     const std::array names{"move","rotate","scale"};
@@ -280,6 +447,13 @@ void captureTransformEvidence(QTemporaryDir& dir,const QString& destination) {
         const auto filename=QString("%1-%2.png").arg(names[i]).arg(qRound(view->devicePixelRatioF()*100));
         check(!screenshot.isNull() && screenshot.save(QDir(destination).filePath(filename)),"Cannot save Studio screenshot");
     }
+    control<QTabWidget>(window,"assetTabs")->setCurrentIndex(1);
+    settledFrame(*view);
+    QTest::qWait(100);
+    auto name=QString("images-%1.png").arg(qRound(view->devicePixelRatioF()*100));
+    check(view->screen()->grabWindow(window.winId()).save(QDir(destination).filePath(name)),
+          "Cannot save image library screenshot");
+
 }
 
 void chooseFile(const QString& path, const std::function<void()>& action,
@@ -331,9 +505,9 @@ void exerciseImport(QTemporaryDir& dir) {
         expose(window);
         fileAction(window,Qt::Key_N,project);
         chooseFile(source,[&]{control<QAction>(window,"importGlb")->trigger();});
-        auto* tree=control<QListWidget>(window,"sceneTree");
-        check(tree->count()==5 && tree->currentRow()==4,"GLB import did not select a new scene object");
-        id=tree->currentItem()->data(Qt::UserRole).toString().toStdString();
+        auto* tree=control<QTreeWidget>(window,"sceneTree");
+        check(tree->topLevelItemCount()==5 && tree->indexOfTopLevelItem(tree->currentItem())==4,"GLB import did not select a new scene object");
+        id=tree->currentItem()->data(0,Qt::UserRole).toString().toStdString();
         enterText(control<QDoubleSpinBox>(window,"positionY"),"3.5");
         auto* vp=static_cast<Viewport*>(control<QWidget>(window,"viewport"));
         vp->setFocus(); QTest::keyClick(vp,Qt::Key_F);
@@ -352,9 +526,9 @@ void exerciseImport(QTemporaryDir& dir) {
     check(QFile::remove(source),"Could not remove disposable source GLB");
     {
         StudioWindow window; expose(window); fileAction(window,Qt::Key_O,project);
-        auto* tree=control<QListWidget>(window,"sceneTree");
-        check(tree->count()==5 && tree->item(4)->data(Qt::UserRole).toString().toStdString()==id,"Imported identity lost on reopen");
-        tree->setCurrentRow(4);
+        auto* tree=control<QTreeWidget>(window,"sceneTree");
+        check(tree->topLevelItemCount()==5 && tree->topLevelItem(4)->data(0,Qt::UserRole).toString().toStdString()==id,"Imported identity lost on reopen");
+        selectSceneRow(tree,4);
         auto* vp=static_cast<Viewport*>(control<QWidget>(window,"viewport"));
         vp->setFocus(); QTest::keyClick(vp,Qt::Key_F);
         auto actual=settledFrame(*vp);
@@ -391,7 +565,7 @@ void exerciseAssetLibrary(QTemporaryDir& dir) {
         expose(window);
         fileAction(window,Qt::Key_N,file);
         auto* library=control<QTreeWidget>(window,"meshLibrary");
-        auto* scene=control<QListWidget>(window,"sceneTree");
+        auto* scene=control<QTreeWidget>(window,"sceneTree");
         auto* viewport=static_cast<Viewport*>(control<QWidget>(window,"viewport"));
         auto* place=control<QPushButton>(window,"placeMeshAsset");
         auto* assign=control<QPushButton>(window,"assignMeshAsset");
@@ -400,21 +574,21 @@ void exerciseAssetLibrary(QTemporaryDir& dir) {
         chooseFile(PLATZ_TEST_MESH,[&]{
             QTest::mouseClick(control<QPushButton>(window,"importMeshAsset"),Qt::LeftButton);
         });
-        check(library->isVisible() && library->topLevelItemCount()==1 && scene->count()==4 &&
+        check(library->isVisible() && library->topLevelItemCount()==1 && scene->topLevelItemCount()==4 &&
               library->currentItem()->data(1,Qt::DisplayRole).toInt()==0,
               "Library import did not create a zero-use asset");
         QTest::mouseClick(place,Qt::LeftButton);
-        objectId=scene->currentItem()->data(Qt::UserRole).toString().toStdString();
-        check(scene->count()==5 && library->currentItem()->data(1,Qt::DisplayRole).toInt()==1,
+        objectId=scene->currentItem()->data(0,Qt::UserRole).toString().toStdString();
+        check(scene->topLevelItemCount()==5 && library->currentItem()->data(1,Qt::DisplayRole).toInt()==1,
               "Add instance failed to update the scene and reference count");
         enterText(control<QDoubleSpinBox>(window,"positionY"),"3.5");
-        scene->setCurrentRow(3);
-        const auto blockId=scene->currentItem()->data(Qt::UserRole);
+        selectSceneRow(scene,3);
+        const auto blockId=scene->currentItem()->data(0,Qt::UserRole);
         QTest::mouseClick(assign,Qt::LeftButton);
-        check(scene->currentItem()->data(Qt::UserRole)==blockId &&
+        check(scene->currentItem()->data(0,Qt::UserRole)==blockId &&
               library->currentItem()->data(1,Qt::DisplayRole).toInt()==2 && !remove->isEnabled(),
               "Assign replaced object identity or let a referenced mesh be removed");
-        scene->setCurrentRow(4);
+        selectSceneRow(scene,4);
         viewport->setFocus();
         QTest::keyClick(viewport,Qt::Key_F);
         const auto before=settledFrame(*viewport);
@@ -455,11 +629,11 @@ void exerciseAssetLibrary(QTemporaryDir& dir) {
         expose(window);
         fileAction(window,Qt::Key_O,file);
         auto* library=control<QTreeWidget>(window,"meshLibrary");
-        auto* scene=control<QListWidget>(window,"sceneTree");
+        auto* scene=control<QTreeWidget>(window,"sceneTree");
         const auto saved=platz::Project::open(file.toStdWString());
         check(saved.find(objectId) && saved.objects()==expectedObjects && library->topLevelItemCount()==1 &&
               library->currentItem()->text(0)=="Low spire" &&
-              library->currentItem()->data(1,Qt::DisplayRole).toInt()==2 && scene->count()==5,
+              library->currentItem()->data(1,Qt::DisplayRole).toInt()==2 && scene->topLevelItemCount()==5,
               "Reopening lost the applied library, object IDs, or reference counts");
         check(window.close(),"Reopened library project did not close");
     }
@@ -475,15 +649,15 @@ void exerciseMaterialSlots(QTemporaryDir& dir) {
         expose(window);
         fileAction(window,Qt::Key_N,file);
         chooseFile(PLATZ_TEST_MATERIALS,[&]{control<QAction>(window,"importGlb")->trigger();});
-        auto* tree=control<QListWidget>(window,"sceneTree");
+        auto* tree=control<QTreeWidget>(window,"sceneTree");
         auto* viewport=static_cast<Viewport*>(control<QWidget>(window,"viewport"));
         auto* materials=control<QComboBox>(window,"materialSlot");
         auto* color=control<QLineEdit>(window,"materialColor");
         auto* reset=control<QPushButton>(window,"resetSlotColor");
-        check(tree->count()==5 && materials->isVisible() && materials->count()==2 &&
+        check(tree->topLevelItemCount()==5 && materials->isVisible() && materials->count()==2 &&
               materials->itemText(0).contains("Copper") && materials->itemText(1).contains("Lagoon"),
               "Imported material slots were not listed in the Inspector.");
-        objectId=tree->currentItem()->data(Qt::UserRole).toString().toStdString();
+        objectId=tree->currentItem()->data(0,Qt::UserRole).toString().toStdString();
         enterText(control<QDoubleSpinBox>(window,"positionY"),"3.5");
         viewport->setFocus();
         QTest::keyClick(viewport,Qt::Key_F);
@@ -522,9 +696,9 @@ void exerciseMaterialSlots(QTemporaryDir& dir) {
         expose(window);
         fileAction(window,Qt::Key_O,file);
         auto* viewport=static_cast<Viewport*>(control<QWidget>(window,"viewport"));
-        auto* tree=control<QListWidget>(window,"sceneTree");
-        tree->setCurrentRow(4);
-        check(tree->currentItem()->data(Qt::UserRole).toString().toStdString()==objectId &&
+        auto* tree=control<QTreeWidget>(window,"sceneTree");
+        selectSceneRow(tree,4);
+        check(tree->currentItem()->data(0,Qt::UserRole).toString().toStdString()==objectId &&
               control<QLineEdit>(window,"materialColor")->text()==authored,
               "Reopened project lost the object ID or slot color.");
         viewport->setFocus();
@@ -547,8 +721,8 @@ void exerciseTextures(QTemporaryDir& dir) {
         expose(window);
         fileAction(window,Qt::Key_N,file);
         chooseFile(source,[&]{control<QAction>(window,"importGlb")->trigger();});
-        auto* tree=control<QListWidget>(window,"sceneTree");
-        objectId=tree->currentItem()->data(Qt::UserRole).toString().toStdString();
+        auto* tree=control<QTreeWidget>(window,"sceneTree");
+        objectId=tree->currentItem()->data(0,Qt::UserRole).toString().toStdString();
         auto* viewport=static_cast<Viewport*>(control<QWidget>(window,"viewport"));
         auto* toggle=control<QCheckBox>(window,"useBaseColorTexture");
         auto* picker=control<QComboBox>(window,"materialSlot");
@@ -586,9 +760,9 @@ void exerciseTextures(QTemporaryDir& dir) {
         expose(window);
         fileAction(window,Qt::Key_O,file);
         auto* viewport=static_cast<Viewport*>(control<QWidget>(window,"viewport"));
-        auto* tree=control<QListWidget>(window,"sceneTree");
-        tree->setCurrentRow(4);
-        check(tree->currentItem()->data(Qt::UserRole).toString().toStdString()==objectId &&
+        auto* tree=control<QTreeWidget>(window,"sceneTree");
+        selectSceneRow(tree,4);
+        check(tree->currentItem()->data(0,Qt::UserRole).toString().toStdString()==objectId &&
               !control<QCheckBox>(window,"useBaseColorTexture")->isChecked(),"Reopen lost the object or texture override.");
         viewport->setFocus();
         QTest::keyClick(viewport,Qt::Key_F);
@@ -608,7 +782,7 @@ void exerciseViewportTransforms(QTemporaryDir& dir, bool scaled) {
     fileAction(window,Qt::Key_N,path);
     auto* viewport=static_cast<Viewport*>(control<QWidget>(window,"viewport"));
     if (scaled) check(viewport->devicePixelRatioF()>1,"High DPI test requires a scaled viewport");
-    auto* tree=control<QListWidget>(window,"sceneTree");
+    auto* tree=control<QTreeWidget>(window,"sceneTree");
     auto* revision=control<QLabel>(window,"authoringMode");
     auto* position=control<QDoubleSpinBox>(window,"positionX");
     auto* scale=control<QDoubleSpinBox>(window,"scaleX");
@@ -617,7 +791,7 @@ void exerciseViewportTransforms(QTemporaryDir& dir, bool scaled) {
     const auto& object=original.objects().at(3);
     const auto originalFrame=settledFrame(*viewport);
     clickViewport(viewport,visiblePoint(originalFrame,4,*viewport));
-    check(tree->currentRow()==3,"Viewport transform test failed to select the block");
+    check(tree->indexOfTopLevelItem(tree->currentItem())==3,"Viewport transform test failed to select the block");
     const auto originalCaption=revision->text();
 
     auto cursor=[&](QPoint point,Qt::MouseButtons buttons=Qt::LeftButton) {
@@ -865,8 +1039,8 @@ void exerciseInspectorPreviews(QTemporaryDir& dir) {
     const auto source=platz::Project::open(file);
     const auto& object=source.objects().at(3);
     auto* viewport=static_cast<Viewport*>(control<QWidget>(window,"viewport"));
-    auto* tree=control<QListWidget>(window,"sceneTree");
-    tree->setCurrentRow(3);
+    auto* tree=control<QTreeWidget>(window,"sceneTree");
+    selectSceneRow(tree,3);
     auto* color=control<QLineEdit>(window,"materialColor");
     auto* spin=control<QDoubleSpinBox>(window,"positionX");
     auto* editor=spin->findChild<QLineEdit*>();
@@ -971,11 +1145,116 @@ void exerciseInspectorPreviews(QTemporaryDir& dir) {
     expose(reopened);
     fileAction(reopened,Qt::Key_O,path);
     auto* view=static_cast<Viewport*>(control<QWidget>(reopened,"viewport"));
-    control<QListWidget>(reopened,"sceneTree")->setCurrentRow(3);
+    selectSceneRow(control<QTreeWidget>(reopened,"sceneTree"),3);
     const auto reloaded=settledFrame(*view);
     check(reloaded.tokens==tinted.tokens && reloaded.rgba==tinted.rgba,"Inspector draft save/reopen changed pixels");
     check(reopened.close(),"Reopened Inspector preview project did not close");
     std::cout<<"Live numeric input, scrubbing and color previews passed with cancellation and persisted undoable commits\n";
+}
+
+void exerciseInspectorSources(QTemporaryDir& dir,const QString& evidenceDir) {
+    const auto path=dir.filePath("Inspector source selection.platz");
+    auto initial=platz::Project::create(path.toStdWString(),"Source selection");
+    auto shared=initial.createNativeMesh("Shared cylinder",platz::defaultNativeMesh(platz::NativeShape::Cylinder),
+                                         true,initial.revision());
+    const auto independent=initial.createNativeMesh("Other mesh",platz::defaultNativeMesh(platz::NativeShape::Sphere),
+                                                    false,initial.revision());
+    const auto sibling=initial.instantiateMesh(shared.key,initial.revision());
+    // Distinct display names make it possible to verify this via normal user selection.
+    auto target=*initial.find(shared.objectId);
+    target.name="First cylinder";
+    initial.edit(target,initial.revision());
+    auto other=*initial.find(sibling);
+    other.name="Second cylinder";
+    initial.edit(other,initial.revision());
+    initial.save();
+    StudioWindow window;
+    expose(window);
+    if (!evidenceDir.isEmpty()) window.resize(1520,970);
+    check(window.openProject(path),"Could not open Inspector source test");
+    auto* tree=control<QTreeWidget>(window,"sceneTree");
+    tree->setCurrentItem(rowNamed(tree,"First cylinder"));
+    auto* picker=control<QComboBox>(window,"meshSourcePicker");
+    auto* position=control<QDoubleSpinBox>(window,"positionX");
+    auto* color=control<QLineEdit>(window,"materialColor");
+    auto section=[&](const char* toggle,QWidget* content) {
+        auto* button=control<QToolButton>(window,toggle);
+        check(button->isVisible() && button->isChecked() && content->isVisible(),"Inspector section missing");
+        button->click();
+        check(!content->isVisible(),"Collapsed Inspector section kept editable fields visible");
+        button->click();
+        check(content->isVisible(),"Expanding the Inspector section lost its fields");
+    };
+    section("inspectorTransformToggle",position);
+    section("inspectorMeshToggle",picker);
+    section("inspectorMaterialToggle",color);
+    check(picker->currentData().toString().toStdString()==shared.key,"Inspector displayed the wrong mesh source");
+    const auto index=picker->findData(QString::fromStdString(independent.key));
+    check(index>=0,"Inspector source chooser omitted available native geometry");
+    picker->showPopup();
+    picker->view()->setCurrentIndex(picker->model()->index(index,0));
+    QTest::keyClick(picker->view(),Qt::Key_Return);
+    QApplication::processEvents();
+    check(picker->currentData().toString().toStdString()==independent.key,"Selecting a library mesh did not rebind the instance");
+    saveStudioEvidence(window,evidenceDir,"inspector-mesh-material.png");
+    auto* view=static_cast<Viewport*>(control<QWidget>(window,"viewport"));
+    view->setFocus();
+    QTest::keyClick(view,Qt::Key_Z,Qt::ControlModifier);
+    check(picker->currentData().toString().toStdString()==shared.key,"Undo failed to restore the prior source");
+    QTest::keyClick(view,Qt::Key_Y,Qt::ControlModifier);
+    control<QAction>(window,"saveStudio")->trigger();
+    const auto rebound=platz::Project::open(path.toStdWString());
+    const auto* result=rebound.find(shared.objectId);
+    check(result && result->asset.key()==independent.key && result->name==target.name &&
+          result->position==target.position && result->rotation==target.rotation && result->scale==target.scale &&
+          rebound.find(sibling) && *rebound.find(sibling)==other,
+          "Reassigning one mesh changed its identity, transform or another instance");
+    tree->setCurrentItem(rowNamed(tree,"Block"));
+    auto* choose=control<QToolButton>(window,"copyAppearance");
+    auto* menu=choose->menu();
+    check(menu,"Inspector is missing the appearance source menu");
+    // The list reflects current project objects when opened.
+    menu->popup(choose->mapToGlobal(QPoint(0,choose->height())));
+    QApplication::processEvents();
+    const auto actions=menu->actions();
+    auto from=std::find_if(actions.begin(),actions.end(),[](QAction* item){
+        return item->text()=="Sphere";
+    });
+    if (from==actions.end()) {menu->hide(); throw std::runtime_error("Appearance source did not list the sphere");}
+    menu->hide();
+    (*from)->trigger();
+    control<QAction>(window,"saveStudio")->trigger();
+    const auto painted=platz::Project::open(path.toStdWString());
+    auto block=std::ranges::find(painted.objects(),"Block",&platz::Object::name);
+    auto sphere=std::ranges::find(painted.objects(),"Sphere",&platz::Object::name);
+    check(block!=painted.objects().end() && sphere!=painted.objects().end() && block->color==sphere->color &&
+          *sphere==*initial.find(sphere->id) && initial.find(block->id)->color!=block->color,
+          "Appearance copy changed its source or failed to update the target");
+    auto* image=control<QComboBox>(window,"baseColorImage");
+    auto* convert=control<QPushButton>(window,"makeEditableMesh");
+    check(convert->isVisible() && !image->isVisible(),"Built-in object has incorrect conversion or image controls");
+    QTest::mouseClick(convert,Qt::LeftButton);
+    check(image->isVisible() && !convert->isVisible(),"Conversion did not expose the native image slot");
+    control<QAction>(window,"saveStudio")->trigger();
+    const auto converted=platz::Project::open(path.toStdWString());
+    const auto* authored=converted.find(block->id);
+    check(authored && authored->asset.data && converted.meshLibrary().at(std::string(authored->asset.key())).native &&
+          authored->name==block->name && authored->position==block->position && authored->rotation==block->rotation &&
+          authored->scale==block->scale && authored->color==block->color,"Conversion lost authored instance properties");
+    view->setFocus();
+    QTest::keyClick(view,Qt::Key_Z,Qt::ControlModifier);
+    check(convert->isVisible() && !image->isVisible(),"Undo failed to restore the built-in mesh");
+    control<QAction>(window,"saveStudio")->trigger();
+    const auto reverted=platz::Project::open(path.toStdWString());
+    check(reverted.objects()==painted.objects() && reverted.meshLibrary()==painted.meshLibrary(),
+          "Undo leaked the converted mesh source or altered other objects");
+    const auto frame=settledFrame(*view);
+    clickViewport(view,visiblePoint(frame,0,*view));
+    check(control<QLabel>(window,"inspectorEmpty")->isVisible() &&
+          !picker->isVisible() && !color->isVisible() && !position->isVisible(),
+          "Empty selection retained editable properties from a previous object");
+    check(window.close(),"Inspector source test failed to close");
+    std::cout<<"Inspector disclosure, selected mesh source, independent instance, appearance copy and no-selection checks passed\n";
 }
 
 void exerciseNativeGeometry(QTemporaryDir& dir) {
@@ -987,11 +1266,11 @@ void exerciseNativeGeometry(QTemporaryDir& dir) {
     expose(window);
     fileAction(window,Qt::Key_O,path);
     auto* view=static_cast<Viewport*>(control<QWidget>(window,"viewport"));
-    auto* tree=control<QListWidget>(window,"sceneTree");
+    auto* tree=control<QTreeWidget>(window,"sceneTree");
     auto* library=control<QTreeWidget>(window,"meshLibrary");
     auto* play=control<QPushButton>(window,"playButton");
     auto getKey=[&]{return library->currentItem()->data(0,Qt::UserRole).toString().toStdString();};
-    const auto count=tree->count();
+    const auto count=tree->topLevelItemCount();
     const auto start=settledFrame(*view);
     using Clock=std::chrono::steady_clock;
     auto parameters=[&](const char* action,bool commit,const std::function<void(QWidget&)>& configure) {
@@ -1041,7 +1320,7 @@ void exerciseNativeGeometry(QTemporaryDir& dir) {
         control<QDoubleSpinBox>(dialog,"meshWidth")->setValue(1.85);
         control<QSpinBox>(dialog,"meshSegments")->setValue(3);
     });
-    check(tree->count()==count && library->topLevelItemCount()==int(original.meshLibrary().size()) &&
+    check(tree->topLevelItemCount()==count && library->topLevelItemCount()==int(original.meshLibrary().size()) &&
           settledFrame(*view).rgba==start.rgba,"Cancelling creation did not restore the exact authored scene");
     const auto created=parameters("createNativeCylinder",true,[](QWidget& dialog){
         control<QLineEdit>(dialog,"nativeMeshName")->setText("Editable taper");
@@ -1049,14 +1328,14 @@ void exerciseNativeGeometry(QTemporaryDir& dir) {
         control<QDoubleSpinBox>(dialog,"meshTopScale")->setValue(.55);
         control<QSpinBox>(dialog,"meshSegments")->setValue(12);
     });
-    check(tree->count()==count+1 && library->currentItem()->data(1,Qt::DisplayRole).toInt()==1 &&
+    check(tree->topLevelItemCount()==count+1 && library->currentItem()->data(1,Qt::DisplayRole).toInt()==1 &&
           settledFrame(*view).tokens==created.tokens,"Create did not place the previewed reusable geometry");
     const auto key=getKey();
-    const auto firstId=tree->currentItem()->data(Qt::UserRole).toString().toStdString();
+    const auto firstId=tree->currentItem()->data(0,Qt::UserRole).toString().toStdString();
     check(key.starts_with("native:"),"Asset library did not expose a native stable identity");
     QTest::mouseClick(control<QPushButton>(window,"placeMeshAsset"),Qt::LeftButton);
     check(library->currentItem()->data(1,Qt::DisplayRole).toInt()==2,"Second instance did not link to the asset");
-    const auto secondId=tree->currentItem()->data(Qt::UserRole).toString().toStdString();
+    const auto secondId=tree->currentItem()->data(0,Qt::UserRole).toString().toStdString();
     enterText(control<QDoubleSpinBox>(window,"positionX"),"2.60");
     enterText(control<QLineEdit>(window,"materialColor"),"#38C9AB");
     view->setFocus();
@@ -1128,7 +1407,7 @@ void exerciseNativeGeometry(QTemporaryDir& dir) {
     });
     const auto sphereKey=getKey();
     check(sphereKey!=key && library->currentItem()->data(1,Qt::DisplayRole).toInt()==0 &&
-          tree->count()==count+2 && settledFrame(*view).rgba==edited.rgba,
+          tree->topLevelItemCount()==count+2 && settledFrame(*view).rgba==edited.rgba,
           "Library-only creation left a transient instance in the authored scene");
     QTest::mouseClick(control<QPushButton>(window,"locateMeshSource"),Qt::LeftButton);
 
@@ -1176,7 +1455,7 @@ void exerciseNativeImages(QTemporaryDir& dir) {
     expose(window);
     fileAction(window,Qt::Key_O,path);
     auto* view=static_cast<Viewport*>(control<QWidget>(window,"viewport"));
-    auto* tree=control<QListWidget>(window,"sceneTree");
+    auto* tree=control<QTreeWidget>(window,"sceneTree");
     auto* images=control<QTreeWidget>(window,"imageLibrary");
     auto* tabs=control<QTabWidget>(window,"assetTabs");
     auto* material=control<QComboBox>(window,"baseColorImage");
@@ -1209,7 +1488,7 @@ void exerciseNativeImages(QTemporaryDir& dir) {
         check(accepted,"Could not create the native mesh for the image workflow");
     };
     acceptMesh("createNativeCube",false);
-    const auto cubeId=tree->currentItem()->data(Qt::UserRole).toString().toStdString();
+    const auto cubeId=tree->currentItem()->data(0,Qt::UserRole).toString().toStdString();
     const auto baseline=settledFrame(*view);
     auto visitEditor=[&](const std::function<void()>& open,bool apply,const std::function<void(QWidget&,RasterCanvas&)>& edit) {
         QTimer watcher;
@@ -1266,7 +1545,8 @@ void exerciseNativeImages(QTemporaryDir& dir) {
         color->setText(hex);
         QTest::mouseClick(control<QToolButton>(dialog,tool),Qt::LeftButton);
     };
-    const auto created=visitEditor([&]{control<QAction>(window,"createNativeImage")->trigger();},true,
+    tabs->setCurrentIndex(1);
+    const auto created=visitEditor([&]{control<QPushButton>(window,"newLibraryImage")->click();},true,
         [&](QWidget& dialog,RasterCanvas& canvas){
             check(control<QCheckBox>(dialog,"bindNewImage")->isChecked(),"Native mesh slot did not offer a live assignment");
             control<QLineEdit>(dialog,"imageName")->setText("Harbor paintwork");
@@ -1341,17 +1621,17 @@ void exerciseNativeImages(QTemporaryDir& dir) {
           images->currentItem()->data(1,Qt::DisplayRole).toInt()==0,"PNG import did not produce a separate editable source");
     QTest::mouseClick(control<QPushButton>(window,"locateImageSource"),Qt::LeftButton);
     check(images->currentItem()->data(0,Qt::UserRole).toString()==id,"Locate Image selected the wrong source");
-    tree->setCurrentRow(6);
+    selectSceneRow(tree,6);
     material->setCurrentIndex(material->findData(id));
     check(images->currentItem()->data(1,Qt::DisplayRole).toInt()==2,"A second material slot did not link to the image");
     control<QAction>(window,"detachLibraryImage")->trigger();
     check(images->currentItem()->data(1,Qt::DisplayRole).toInt()==1,"Detaching an image did not restore the prior slot binding");
-    tree->setCurrentRow(tree->count()-1);
+    selectSceneRow(tree,tree->topLevelItemCount()-1);
     QTest::mouseClick(control<QPushButton>(window,"playButton"),Qt::LeftButton);
     check(!control<QAction>(window,"createNativeImage")->isEnabled() &&
           !control<QPushButton>(window,"editNativeImage")->isEnabled(),"Image authoring remained enabled during Play");
     const auto play=settledFrame(*view);
-    clickViewport(view,visiblePoint(play,tree->count(),*view));
+    clickViewport(view,visiblePoint(play,tree->topLevelItemCount(),*view));
     check(settledFrame(*view).tokens!=play.tokens,"Textured native mesh failed to interact in Play");
     key(Qt::Key_Escape);
     check(settledFrame(*view).rgba==retinted.second.rgba,"Play changed the authored image");
@@ -1369,7 +1649,7 @@ void exerciseNativeImages(QTemporaryDir& dir) {
     StudioWindow reopened;
     expose(reopened);
     fileAction(reopened,Qt::Key_O,path);
-    control<QListWidget>(reopened,"sceneTree")->setCurrentRow(int(saved.objects().size())-1);
+    selectSceneRow(control<QTreeWidget>(reopened,"sceneTree"),int(saved.objects().size())-1);
     auto* reopenedView=static_cast<Viewport*>(control<QWidget>(reopened,"viewport"));
     check(settledFrame(*reopenedView).rgba==reshaped.rgba &&
           control<QComboBox>(reopened,"baseColorImage")->currentData().toString()==id,
@@ -1490,7 +1770,7 @@ void exerciseWorkspaces(QTemporaryDir& dir,bool highDpi) {
             playKey->setKeySequence(QKeySequence("Ctrl+S"));
             check(!apply->isEnabled() && warning->text().contains("already assigned"),"Duplicate shortcut was accepted");
             playKey->setKeySequence(QKeySequence("Ctrl+K"));
-            check(!apply->isEnabled() && warning->text().contains("Find commands"),"Command search binding could be stolen");
+            check(!apply->isEnabled() && warning->text().contains("Search Studio"),"Command search binding could be stolen");
             playKey->setKeySequence(QKeySequence(Qt::Key_F6));
             frameKey->setKeySequence(QKeySequence(Qt::Key_W));
             check(!apply->isEnabled(),"Frame binding could override camera movement");
@@ -1504,6 +1784,21 @@ void exerciseWorkspaces(QTemporaryDir& dir,bool highDpi) {
         });
         check(qApp->font().pointSizeF()==12.5 && qApp->palette().color(QPalette::Window)==QColor("#0a1116") &&
               qApp->styleSheet().contains("#f3c57b"),"Theme, accent and type scale did not apply");
+        auto searchFor=[&](const QString& query) {
+            withModal(control<QAction>(window,"findStudioCommands"),"studioCommandSearch",[&](QDialog& dialog){
+                auto* input=control<QLineEdit>(dialog,"studioCommandFilter");
+                input->setText(query);
+                check(control<QListWidget>(dialog,"studioCommandResults")->count()==1,"Studio search did not resolve its target");
+                QTest::keyClick(input,Qt::Key_Return);
+            });
+        };
+        check(control<QPushButton>(window,"studioSearchButton")->isVisible(),"Project toolbar concealed Studio search");
+        searchFor("Scene Silver block");
+        check(control<QLineEdit>(window,"objectName")->text()=="Silver block","Search failed to inspect the selected object");
+        picker->setCurrentIndex(picker->findData("modeling"));
+        searchFor("Meshes Low spire");
+        check(assets->isVisible() && control<QTabWidget>(window,"assetTabs")->currentIndex()==0,
+              "Mesh search did not reveal the mesh library");
         withModal(control<QAction>(window,"findStudioCommands"),"studioCommandSearch",[](QDialog& dialog){
             auto* search=control<QLineEdit>(dialog,"studioCommandFilter");
             search->setText("playtest");
@@ -1516,7 +1811,8 @@ void exerciseWorkspaces(QTemporaryDir& dir,bool highDpi) {
         QTest::keyClick(viewport,Qt::Key_F5);
         check(play->text().contains("Play"),"Old binding still activated Play");
         QTest::keyClick(viewport,Qt::Key_F6);
-        check(play->text().contains("Stop"),"Remapped Play shortcut did not activate");
+        check(play->text().contains("Stop") && !control<QWidget>(window,"toolMove")->isVisible(),
+              "Play did not switch to runtime controls");
         QTest::keyClick(viewport,Qt::Key_Escape);
         check(play->text().contains("Play"),"Escape did not restore authoring with custom shortcuts");
         picker->setCurrentIndex(picker->findData(custom));
@@ -1591,18 +1887,25 @@ void exercise(const QString& path, bool create) {
         sceneId = before.sceneId();
         check(before.objects().size() >= 4, "Scene has insufficient distinct objects");
         auto* viewport = static_cast<Viewport*>(control<QWidget>(window, "viewport"));
-        auto* tree = control<QListWidget>(window, "sceneTree");
+        auto* tree = control<QTreeWidget>(window, "sceneTree");
         auto* name = control<QLineEdit>(window, "objectName");
         auto* position = control<QDoubleSpinBox>(window, "positionX");
         auto* number=position->findChild<QLineEdit*>();
         check(number && number->visibleRegion().boundingRect().width()>=35,"Inspector numeric editor is clipped");
+        auto* identity=control<QLabel>(window,"objectIdentity");
+        auto* reveal=control<QToolButton>(window,"toggleObjectId");
+        check(identity->isHidden(),"Object metadata should start collapsed");
+        reveal->click();
+        check(identity->isVisible() && identity->text()==QString::fromStdString(before.objects().front().id),
+              "Object metadata disclosure showed the wrong identifier");
+        reveal->click();
         auto* color = control<QLineEdit>(window, "materialColor");
         auto* play = control<QPushButton>(window, "playButton");
-        check(viewport->isVisible() && tree->count() == int(before.objects().size()),
+        check(viewport->isVisible() && tree->topLevelItemCount() == int(before.objects().size()),
               "Opened project failed to populate the visible Studio");
         auto frame = settledFrame(*viewport);
-        const auto initialCount=tree->count();
-        tree->setCurrentRow(1);
+        const auto initialCount=tree->topLevelItemCount();
+        selectSceneRow(tree,1);
         const auto originalFrame=settledFrame(*viewport);
         for (const bool apply : {false,true}) {
             bool previewVisible=false;
@@ -1616,31 +1919,31 @@ void exercise(const QString& path, bool create) {
             });
             control<QAction>(window,"repeatObjects")->trigger();
             check(previewVisible,"Array preview did not reach the renderer");
-            check(tree->count()==initialCount+(apply?2:0),"Array creation/cancellation changed wrong object count");
+            check(tree->topLevelItemCount()==initialCount+(apply?2:0),"Array creation/cancellation changed wrong object count");
         }
-        const auto arrayIds=std::array{tree->item(2)->data(Qt::UserRole),tree->item(3)->data(Qt::UserRole)};
+        const auto arrayIds=std::array{tree->topLevelItem(2)->data(0,Qt::UserRole),tree->topLevelItem(3)->data(0,Qt::UserRole)};
         QTest::keyClick(tree,Qt::Key_Z,Qt::ControlModifier);
-        check(tree->count()==initialCount,"Array undo was not atomic");
+        check(tree->topLevelItemCount()==initialCount,"Array undo was not atomic");
         QTest::keyClick(tree,Qt::Key_Y,Qt::ControlModifier);
-        check(tree->item(2)->data(Qt::UserRole)==arrayIds[0] && tree->item(3)->data(Qt::UserRole)==arrayIds[1],
+        check(tree->topLevelItem(2)->data(0,Qt::UserRole)==arrayIds[0] && tree->topLevelItem(3)->data(0,Qt::UserRole)==arrayIds[1],
               "Array redo replaced copy identities");
         QTest::keyClick(tree,Qt::Key_Z,Qt::ControlModifier);
         // Add through Studio's creation menu. The file stays at its opened revision.
         auto* add = control<QPushButton>(window, "addObject");
         check(add->menu() && add->menu()->findChild<QAction*>("importGlb"), "Creation menu is unavailable");
         add->menu()->actions().front()->trigger();
-        check(tree->count()==int(before.objects().size()+1), "Add object failed");
-        const auto addedId=tree->currentItem()->data(Qt::UserRole).toString();
+        check(tree->topLevelItemCount()==int(before.objects().size()+1), "Add object failed");
+        const auto addedId=tree->currentItem()->data(0,Qt::UserRole).toString();
         viewport->setFocus();
         QTest::keyClick(viewport,Qt::Key_D,Qt::ControlModifier);
-        check(tree->count()==int(before.objects().size()+2) && tree->currentItem()->data(Qt::UserRole).toString()!=addedId,
+        check(tree->topLevelItemCount()==int(before.objects().size()+2) && tree->currentItem()->data(0,Qt::UserRole).toString()!=addedId,
               "Duplicate did not select a new stable identity");
         tree->setFocus();
         QTest::keyClick(tree,Qt::Key_Delete);
-        check(tree->count()==int(before.objects().size()+1),"Delete failed");
+        check(tree->topLevelItemCount()==int(before.objects().size()+1),"Delete failed");
         // Undo delete, duplicate and add to return to the reference scene.
         for(int i=0;i<3;++i) QTest::keyClick(tree,Qt::Key_Z,Qt::ControlModifier);
-        check(tree->count()==int(before.objects().size()),"Undo did not restore original object count");
+        check(tree->topLevelItemCount()==int(before.objects().size()),"Undo did not restore original object count");
         auto* dock=control<QDockWidget>(window,"inspectorDock");
         dock->toggleViewAction()->trigger();
         check(!dock->isVisible(),"Inspector docking visibility control failed");
@@ -1741,6 +2044,20 @@ int main(int argc, char** argv) {
         check(temp.isValid(), "Cannot create isolated test-project directory");
         QSettings::setDefaultFormat(QSettings::IniFormat);
         QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, temp.path());
+        if (app.arguments().value(1)=="--organization-reopen") {
+            check(app.arguments().size()==7,"Folder restart needs project, preferences and three identities");
+            QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,app.arguments()[3]);
+            checkSavedFolders(app.arguments()[2],app.arguments().mid(4));
+            return 0;
+        }
+        if (app.arguments().contains("--organization")) {
+            const int flag=app.arguments().indexOf("--evidence-dir");
+            const QString destination=flag>=0 ? app.arguments().value(flag+1) : QString{};
+            check(flag<0 || !destination.isEmpty(),"Expected a directory after --evidence-dir");
+            exerciseOrganization(temp.filePath("Organized.platz"),temp.path(),destination);
+            exerciseInspectorSources(temp,destination);
+            return 0;
+        }
         if (app.arguments().contains("--drag-profile")) {
             profileViewportDrag(app,temp,app.arguments().contains("--dense"),app.arguments().contains("--scaled-scene"),
                                 app.arguments().contains("--gates"));

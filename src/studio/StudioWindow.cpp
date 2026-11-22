@@ -1,4 +1,5 @@
 #include "StudioWindow.hpp"
+#include "OrganizerTree.hpp"
 #include "Appearance.hpp"
 #include "Viewport.hpp"
 #include <QAction>
@@ -24,6 +25,7 @@
 #include <QStatusBar>
 #include <QTimer>
 #include <QToolBar>
+#include <QToolButton>
 #include <algorithm>
 #include <cmath>
 
@@ -83,8 +85,21 @@ void StudioWindow::buildMenus() {
     });
     repeat_=edit->addAction(tr("Repeat objects…"),QKeySequence(Qt::CTRL|Qt::SHIFT|Qt::Key_D),this,&StudioWindow::repeatObjects);
     repeat_->setObjectName("repeatObjects");
-    tree_->setContextMenuPolicy(Qt::ActionsContextMenu);
-    tree_->addActions({duplicate_,repeat_,erase_});
+    const auto renameSelected=[this]{
+        if (selected_.empty() || runtime_) return;
+        inspectorDock_->show();
+        name_->setFocus();
+        name_->selectAll();
+    };
+    tree_->appendContextActions=[this,renameSelected](QMenu& menu){
+        menu.addSeparator();
+        auto* rename=menu.addAction(tr("Rename object"),this,renameSelected);
+        rename->setEnabled(!runtime_ && !selected_.empty());
+        menu.addActions({duplicate_,repeat_,erase_});
+    };
+    auto* renameKey=new QShortcut(QKeySequence(Qt::Key_F2),tree_);
+    renameKey->setContext(Qt::WidgetShortcut);
+    connect(renameKey,&QShortcut::activated,this,renameSelected);
     auto* deleteKey = new QShortcut(QKeySequence::Delete,tree_);
     deleteKey->setContext(Qt::WidgetShortcut);
     connect(deleteKey,&QShortcut::activated,erase_,&QAction::trigger);
@@ -121,7 +136,7 @@ void StudioWindow::buildMenus() {
     view->addSeparator();
     auto* customize=view->addAction(tr("Customize Studio…"),this,&StudioWindow::customizeStudio);
     customize->setObjectName("customizeStudio");
-    searchCommandsAction_=view->addAction(tr("Find commands…"),QKeySequence(Qt::CTRL|Qt::Key_K),this,&StudioWindow::findCommands);
+    searchCommandsAction_=view->addAction(tr("Search Studio…"),QKeySequence(Qt::CTRL|Qt::Key_K),this,&StudioWindow::findCommands);
     searchCommandsAction_->setObjectName("findStudioCommands");
     buildWorkspaceMenu();
     auto* run = menuBar()->addMenu(tr("&Runtime"));
@@ -137,7 +152,7 @@ void StudioWindow::buildMenus() {
                "Inspector transform and base-color edits preview as you type. Press Enter or leave the field to apply valid input. Drag a numeric axis label to scrub and hold Shift for finer adjustments. Escape restores the previous value.\n\n"
                "Right drag to orbit, middle drag to pan, or use the wheel to zoom. In the viewport the arrow keys orbit, WASD moves and Home resets the camera.\n\n"
                "Use the Play button to enter the runtime. Click an object or press Space to turn it. Escape returns to the authored scene.\n\n"
-               "View → Customize Studio lists the active shortcuts. Ctrl+K searches available commands."));
+               "View → Customize Studio lists the active shortcuts. Ctrl+K finds commands, scene objects and assets."));
     });
 }
 
@@ -182,10 +197,12 @@ bool StudioWindow::confirmLeave() {
           QMessageBox::Save|QMessageBox::Discard|QMessageBox::Cancel,QMessageBox::Save);
     return choice==QMessageBox::Discard || (choice==QMessageBox::Save && saveChanges());
 }
+StudioWindow::~StudioWindow() = default;
+
 void StudioWindow::toHub() {
     if (!confirmLeave()) return;
     captureWorkspace();
-    runtime_.reset(); project_.reset(); selected_.clear();
+    runtime_.reset(); project_.reset(); organization_.reset(); selected_.clear();
     pages_->setCurrentWidget(hub_);
     sceneDock_->hide(); inspectorDock_->hide(); assetsDock_->hide(); tools_->hide();
     sceneDock_->toggleViewAction()->setEnabled(false);
@@ -211,6 +228,7 @@ void StudioWindow::attach(platz::Project project) {
     const bool fromHub=!project_;
     runtime_.reset();
     project_=std::move(project);
+    organization_=std::make_unique<StudioOrganization>(QString::fromStdString(project_->id()));
     selected_=project_->objects().empty() ? std::string{} : project_->objects().front().id;
     pages_->setCurrentIndex(1);
     if (fromHub) {
@@ -237,12 +255,12 @@ bool StudioWindow::openProject(const QString& path) {
     }
 }
 void StudioWindow::chooseProject() {
-    auto path=QFileDialog::getOpenFileName(this,tr("Open PLATZ project"),{},tr("PLATZ projects (*.platz)"),nullptr,QFileDialog::DontUseNativeDialog);
+    auto path=QFileDialog::getOpenFileName(this,tr("Open PLATZ project"),{},tr("PLATZ projects (*.platz)"));
     if(!path.isEmpty()) openProject(path);
 }
 void StudioWindow::newProject() {
     auto path=QFileDialog::getSaveFileName(this,tr("Create PLATZ project"),{},tr("PLATZ projects (*.platz)"),nullptr,
-                                            QFileDialog::DontConfirmOverwrite|QFileDialog::DontUseNativeDialog);
+                                            QFileDialog::DontConfirmOverwrite);
     if(path.isEmpty() || !confirmLeave()) return;
     if(!path.endsWith(".platz",Qt::CaseInsensitive)) path+=".platz";
     protectedCall([&]{
@@ -268,14 +286,7 @@ void StudioWindow::refresh(const std::string& preferredAsset) {
     const auto& objects=runtime_ ? runtime_->objects() : project_->objects();
     if (!selected_.empty() && !project_->find(selected_))
         selected_=objects.empty() ? std::string{} : objects.front().id;
-    tree_->clear();
-    for (const auto& o : objects) {
-        auto* item=new QListWidgetItem(meshIcon(o.mesh,o.color),QString::fromStdString(o.name),tree_);
-        item->setData(Qt::UserRole,QString::fromStdString(o.id));
-        item->setToolTip(QString::fromUtf8(platz::meshName(o.mesh))+" · "+QString::fromStdString(o.id));
-        if (o.id==selected_) tree_->setCurrentItem(item);
-    }
-    count_->setText(tr("WORLD   /   %1 OBJECTS").arg(objects.size()));
+    refreshSceneTree();
     projectTitle_->setText(QString::fromStdString(project_->name()));
     const auto title=QString::fromStdString(project_->name());
     projectTitle_->setText(projectTitle_->fontMetrics().elidedText(title,Qt::ElideRight,224));
@@ -288,6 +299,7 @@ void StudioWindow::refresh(const std::string& preferredAsset) {
     syncControlHelp();
     frameAction_->setEnabled(true);
     playAction_->setEnabled(true);
+    transformControls_->setVisible(!runtime_);
     transformControls_->setEnabled(!runtime_);
     createMenu_->setEnabled(!runtime_);
     for (auto* action:nativeCreationActions_) action->setEnabled(!runtime_);
@@ -303,6 +315,20 @@ void StudioWindow::refresh(const std::string& preferredAsset) {
     refreshAssets(preferredAsset);
     viewport_->setScene(objects,selected_);
 }
+void StudioWindow::refreshSceneTree() {
+    if (!project_) return;
+    const QSignalBlocker blocker(tree_);
+    const auto& objects=runtime_ ? runtime_->objects() : project_->objects();
+    tree_->beginRefresh();
+    for (const auto& object:objects) {
+        auto* item=tree_->addSource(QString::fromStdString(object.id),QString::fromStdString(object.name));
+        item->setIcon(0,meshIcon(object.mesh,object.color));
+        item->setToolTip(0,QString::fromUtf8(platz::meshName(object.mesh)));
+    }
+    tree_->endRefresh(QString::fromStdString(selected_),false);
+    count_->setText(tr("%n scene object(s)",nullptr,static_cast<int>(objects.size())));
+}
+
 void StudioWindow::syncInspector() {
     QScopedValueRollback<bool> refreshing(refreshing_,true);
     const platz::Object* object=nullptr;
@@ -320,7 +346,10 @@ void StudioWindow::syncInspector() {
                                 tr("Save the exact imported bytes from the project."));
     locateMesh_->setVisible(embedded && !runtime_);
     locateMesh_->setText(native ? tr("Locate editable source") : tr("Locate imported asset"));
-    inspector_->setEnabled(editable);
+    inspectorDetails_->setVisible(object);
+    inspectorEmpty_->setVisible(!object);
+    inspectorDetails_->setEnabled(editable);
+    syncMeshSources(object);
     duplicate_->setEnabled(editable);
     repeat_->setEnabled(editable);
     erase_->setEnabled(editable);
@@ -402,13 +431,20 @@ void StudioWindow::syncMaterial(const platz::Object* object) {
     imageSlot_->clear();
     if (compatible && project_) {
         imageSlot_->addItem(tr("Default texture"),QString{});
-        for (const auto& [id,entry]:project_->imageLibrary())
-            imageSlot_->addItem(QString::fromStdString(entry.name),QString::fromStdString(id));
+        std::vector<std::pair<QString,QString>> choices;
+        for (const auto& [key,entry]:project_->imageLibrary()) {
+            const auto id=QString::fromStdString(key);
+            choices.emplace_back(assetChoiceLabel(true,id,QString::fromStdString(entry.name)),id);
+        }
+        std::ranges::sort(choices,[](const auto& a,const auto& b){return QString::localeAwareCompare(a.first,b.first)<0;});
+        for (const auto& [label,id]:choices) imageSlot_->addItem(label,id);
         if (image) imageSlot_->setCurrentIndex(imageSlot_->findData(QString::fromStdString(image->imageId)));
     }
     imageSlot_->setVisible(compatible);
     locateImage_->setVisible(image && !runtime_);
+    makeImageUnique_->setVisible(image && !runtime_);
     updateImageActions();
+    appearanceSource_->setVisible(object && !runtime_ && project_->objects().size()>1);
     const bool usesTexture=image || (slot && asset->textureForSlot(index,object->texturesOff));
     useTexture_->setVisible(slot && slot->texture && !image);
     useTexture_->setEnabled(!runtime_ && slot && slot->texture);
@@ -458,12 +494,13 @@ void StudioWindow::select(std::string id,bool fromViewport) {
     selected_=id;
     if (runtime_ && fromViewport && runtime_->interact(id)) notify(tr("Turned runtime object"));
     QScopedValueRollback<bool> refreshing(refreshing_,true);
-    const auto* rowItem=tree_->currentItem();
-    const auto rowId=rowItem ? rowItem->data(Qt::UserRole).toString().toStdString() : std::string{};
-    if (id!=rowId) {
-        int row=-1;
-        for(int i=0;i<tree_->count();++i) if (tree_->item(i)->data(Qt::UserRole).toString().toStdString()==id) {row=i;break;}
-        tree_->setCurrentRow(row);
+    if (id.empty()) {
+        if (fromViewport) {
+            tree_->clearSelection();
+            tree_->setCurrentItem(nullptr);
+        }
+    } else if (tree_->selectedSource()!=QString::fromStdString(id) || fromViewport) {
+        tree_->revealSource(QString::fromStdString(id));
     }
     syncInspector();
     syncSaveState();

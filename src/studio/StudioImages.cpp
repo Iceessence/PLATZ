@@ -1,4 +1,6 @@
 #include "StudioWindow.hpp"
+#include "OrganizerTree.hpp"
+#include <QStyle>
 #include "RasterCanvas.hpp"
 #include <QAction>
 #include <QBuffer>
@@ -11,6 +13,7 @@
 #include <QImageWriter>
 #include <QInputDialog>
 #include <QLineEdit>
+#include <QLabel>
 #include <QMenu>
 #include <QPushButton>
 #include <QSignalBlocker>
@@ -18,21 +21,35 @@
 #include <QSaveFile>
 #include <QTreeWidget>
 #include <QVBoxLayout>
+#include <algorithm>
 
 QWidget* StudioWindow::buildImageLibrary() {
     auto* panel=new QWidget;
     auto* layout=new QVBoxLayout(panel);
     layout->setContentsMargins(8,8,8,8);
-    imageList_=new QTreeWidget;
+    imageList_=new OrganizerTree(StudioOrganization::Kind::Images,[this]{return organization_.get();},
+                                 [this]{return project_ && !runtime_;});
+    layout->addWidget(imageList_->makeControls(panel));
+    imageList_->onOrganizationChanged=[this]{
+        refreshImages();
+        if (!preview_) syncInspector();
+    };
     imageList_->setObjectName("imageLibrary");
     imageList_->setAccessibleName(tr("Project image assets"));
     imageList_->setHeaderLabels({tr("Image"),tr("Uses")});
-    imageList_->setRootIsDecorated(false);
     imageList_->setUniformRowHeights(true);
     imageList_->header()->setStretchLastSection(false);
     imageList_->header()->setSectionResizeMode(0,QHeaderView::Stretch);
     imageList_->header()->setSectionResizeMode(1,QHeaderView::ResizeToContents);
+    emptyImages_=new QLabel;
+    emptyImages_->setWordWrap(true);
+    emptyImages_->setProperty("role","minor");
+    layout->addWidget(emptyImages_,1);
     layout->addWidget(imageList_,1);
+    newImage_=new QPushButton(tr("New image…"));
+    newImage_->setObjectName("newLibraryImage");
+    connect(newImage_,&QPushButton::clicked,this,[this]{createImageAction_->trigger();});
+    layout->addWidget(newImage_);
     auto* row=new QHBoxLayout;
     importImage_=new QPushButton(tr("Import…"));
     importImage_->setObjectName("importImagePng");
@@ -51,6 +68,7 @@ QWidget* StudioWindow::buildImageLibrary() {
     connect(editImage_,&QPushButton::clicked,this,[this]{editImage(selectedImage());});
     auto* menu=new QMenu(manageImage_);
     manageImage_->setMenu(menu);
+    menu->addSection(tr("Selected material slot"));
     assignImageAction_=menu->addAction(tr("Assign to selected slot"),this,[this]{
         if (const auto target=currentImageTarget()) protectedCall([&]{
             project_->assignImage(*target,selectedImage(),project_->revision());
@@ -68,7 +86,7 @@ QWidget* StudioWindow::buildImageLibrary() {
     uniqueImageAction_=menu->addAction(tr("Make selected slot unique…"),this,[this]{
         if (const auto target=currentImageTarget()) nameImage(selectedImage(),true,target);
     });
-    menu->addSeparator();
+    menu->addSection(tr("Editable image source"));
     menu->addAction(tr("Rename image…"),this,[this]{nameImage(selectedImage(),false);});
     menu->addAction(tr("Duplicate image…"),this,[this]{nameImage(selectedImage(),true);});
     auto* exportAction=menu->addAction(tr("Export PNG…"),this,[this]{
@@ -84,6 +102,11 @@ QWidget* StudioWindow::buildImageLibrary() {
             refresh();
         });
     });
+    imageList_->appendContextActions=[this,menu](QMenu& context){
+        auto* edit=context.addAction(tr("Edit image…"),editImage_,&QPushButton::click);
+        edit->setEnabled(editImage_->isEnabled());
+        if (manageImage_->isEnabled()) context.addActions(menu->actions());
+    };
     return panel;
 }
 
@@ -94,42 +117,55 @@ std::optional<platz::ImageTarget> StudioWindow::currentImageTarget() const {
     return platz::ImageTarget{object->id,static_cast<unsigned>(slot)};
 }
 std::string StudioWindow::selectedImage() const {
-    const auto items=imageList_->selectedItems();
-    const auto* item=items.isEmpty() ? nullptr : items.front();
-    return item ? item->data(0,Qt::UserRole).toString().toStdString() : std::string{};
+    return imageList_->selectedSource().toStdString();
 }
 void StudioWindow::refreshImages(const std::string& preferred) {
-    const auto selected=preferred.empty() ? selectedImage() : preferred;
     const QSignalBlocker blocker(imageList_);
-    imageList_->clear();
+    imageList_->beginRefresh();
     if (project_) {
         std::map<std::string_view,int> uses;
         for (const auto& object:project_->objects())
             for (const auto& image:object.images) ++uses[image.imageId];
         for (const auto& [id,image]:project_->imageLibrary()) {
-            auto* item=new QTreeWidgetItem(imageList_);
-            item->setText(0,QString::fromStdString(image.name));
-            item->setData(0,Qt::UserRole,QString::fromStdString(id));
+            auto* item=imageList_->addSource(QString::fromStdString(id),QString::fromStdString(image.name));
+            const QImage pixels(image.raster->pixels().data(),int(image.raster->width()),int(image.raster->height()),
+                                int(image.raster->width()*4),QImage::Format_RGBA8888);
+            item->setIcon(0,QIcon(QPixmap::fromImage(pixels.scaled(24,24,Qt::KeepAspectRatio,Qt::FastTransformation))));
             item->setData(1,Qt::DisplayRole,uses[id]);
             item->setTextAlignment(1,Qt::AlignRight|Qt::AlignVCenter);
             item->setToolTip(0,tr("RGBA · %1 × %2\nSource ID %3")
                 .arg(image.raster->width()).arg(image.raster->height()).arg(QString::fromStdString(id)));
-            if (id==selected) imageList_->setCurrentItem(item);
         }
-        imageList_->sortItems(0,Qt::AscendingOrder);
-        if (!imageList_->currentItem() && imageList_->topLevelItemCount())
-            imageList_->setCurrentItem(imageList_->topLevelItem(0));
+    }
+    imageList_->endRefresh(QString::fromStdString(preferred));
+    if (!preferred.empty()) imageList_->revealSource(QString::fromStdString(preferred));
+    const bool empty=!project_ || project_->imageLibrary().empty();
+    emptyImages_->setVisible(empty);
+    imageList_->setVisible(imageList_->topLevelItemCount()>0);
+    if (empty) {
+        bool embedded=false;
+        if (project_) for (const auto& [key,entry]:project_->meshLibrary()) {
+            const auto& materials=entry.asset.data->materialSlots();
+            if (std::ranges::any_of(materials,[](const auto& material){return material.texture.has_value();})) {
+                embedded=true;
+                break;
+            }
+        }
+        emptyImages_->setText(embedded ? tr("No editable images yet. Imported textures are embedded in their meshes.") :
+                                         tr("Create an image to paint, or import a PNG."));
     }
     updateImageActions();
 }
 void StudioWindow::updateImageActions() {
     if (!imageList_) return;
     const bool editable=project_ && !runtime_;
-    const auto* selected=imageList_->currentItem();
-    const bool available=editable && selected;
+    const auto selectedRows=imageList_->selectedItems();
+    const auto* selected=selectedRows.isEmpty() ? nullptr : selectedRows.front();
+    const bool available=editable && selected && project_->imageLibrary().contains(selectedImage());
     const auto target=currentImageTarget();
     const auto* used=target ? platz::slotImage(project_->find(target->objectId)->images,target->slot) : nullptr;
     const bool owns=used && used->imageId==selectedImage();
+    newImage_->setEnabled(editable);
     importImage_->setEnabled(editable);
     editImage_->setEnabled(available);
     manageImage_->setEnabled(available);
@@ -169,8 +205,7 @@ void StudioWindow::importPng() {
     finishActiveField();
     const auto revision=project_->revision();
     const auto projectId=project_->id();
-    const auto path=QFileDialog::getOpenFileName(this,tr("Import PNG image"),{},tr("PNG images (*.png)"),nullptr,
-                                               QFileDialog::DontUseNativeDialog);
+    const auto path=QFileDialog::getOpenFileName(this,tr("Import PNG image"),{},tr("PNG images (*.png)"));
     if (path.isEmpty() || !project_ || runtime_ || project_->id()!=projectId) return;
     protectedCall([&]{
         QFile input(path);
@@ -198,7 +233,6 @@ void StudioWindow::importPng() {
 }
 void StudioWindow::exportPng(platz::Raster raster) {
     QFileDialog dialog(this,tr("Export PNG"),{},tr("PNG images (*.png)"));
-    dialog.setOption(QFileDialog::DontUseNativeDialog);
     dialog.setAcceptMode(QFileDialog::AcceptSave);
     dialog.setDefaultSuffix("png");
     if (dialog.exec()!=QDialog::Accepted) return;

@@ -27,6 +27,40 @@ XMVECTOR offset(const Camera& camera) {
     return XMVectorSet(std::sin(camera.yaw) * cp, std::sin(camera.pitch), std::cos(camera.yaw) * cp, 0);
 }
 
+// View-space sphere tests use the same right-handed view and FOV as the scene shader.
+struct CameraFrame {
+    XMVECTOR eye;
+    XMMATRIX view, viewProjection;
+    float nearZ, farZ, slopeX, slopeY, sideX, sideY;
+
+    CameraFrame(const Camera& camera,float aspect) {
+        const auto target=vector(camera.target);
+        eye=target+offset(camera)*camera.distance;
+        view=XMMatrixLookAtRH(eye,target,XMVectorSet(0,1,0,0));
+        nearZ=camera.nearPlane();
+        farZ=camera.farPlane();
+        viewProjection=view*XMMatrixPerspectiveFovRH(fov,aspect,nearZ,farZ);
+        slopeY=std::tan(fov*.5f);
+        slopeX=slopeY*aspect;
+        sideX=std::hypot(1.f,slopeX);
+        sideY=std::hypot(1.f,slopeY);
+    }
+    bool outside(const DrawObject& object) const {
+        // Enclose even an off-origin imported mesh under any rotation and nonuniform scale.
+        auto half=XMVectorReplicate(.5f);
+        if (object.asset)
+            half=XMVectorMax(XMVectorAbs(vector(object.asset->minCorner())),XMVectorAbs(vector(object.asset->maxCorner())));
+        const float radius=XMVectorGetX(XMVector3Length(half*vector(object.scale)));
+        XMFLOAT3 center;
+        XMStoreFloat3(&center,XMVector3TransformCoord(vector(object.position),view));
+        const float depth=-center.z;
+        const float margin=radius+.0001f+std::abs(depth)*.00001f;
+        return depth+margin<nearZ || depth-margin>farZ ||
+               std::abs(center.x)>depth*slopeX+margin*sideX ||
+               std::abs(center.y)>depth*slopeY+margin*sideY;
+    }
+};
+
 struct Vertex {
     XMFLOAT3 position, normal;
     XMFLOAT2 uv;
@@ -301,7 +335,9 @@ struct Renderer::Impl {
     void upload(const std::map<std::string,const platz::MeshAsset*>& assets);
     void uploadTextures(const TextureSources& sources);
     void finishTransfer();
-    void prepare(Frame&, std::span<const SceneDraw>, const Camera&, uint32_t);
+    std::vector<SceneDraw> drawList;
+    size_t lastCulled{};
+    void prepare(Frame&, std::span<const SceneDraw>, const Camera&, const CameraFrame&, uint32_t);
     void record(Frame&, std::span<const SceneDraw>, uint32_t);
     bool draw(std::span<const DrawObject>, const Camera&, uint32_t, std::span<const OverlayVertex>, bool);
     Capture read(uint32_t, uint32_t, uint32_t, uint32_t, bool);
@@ -821,7 +857,7 @@ void Renderer::Impl::makePipelines() {
 }
 
 void Renderer::Impl::prepare(Frame& f, std::span<const SceneDraw> draws, const Camera& camera,
-                             uint32_t selected) {
+                             const CameraFrame& frame,uint32_t selected) {
     static_assert(offsetof(Constants, viewProjection) == shaders::offset::viewProjection &&
                   offsetof(Constants, world) == shaders::offset::world);
     static_assert(offsetof(Constants, normal) == shaders::offset::normalMatrix &&
@@ -848,12 +884,8 @@ void Renderer::Impl::prepare(Frame& f, std::span<const SceneDraw> draws, const C
         vkUpdateDescriptorSets(d.device, 1, &write, 0, nullptr);
     }
     Constants c{};
-    auto center = vector(camera.target), eye = center + offset(camera) * camera.distance;
-    auto view = XMMatrixLookAtRH(eye, center, XMVectorSet(0, 1, 0, 0));
-    auto projection = XMMatrixPerspectiveFovRH(fov, float(extent.width) / float(extent.height),
-        camera.nearPlane(),camera.farPlane());
-    XMStoreFloat4x4(&c.viewProjection, view * projection);
-    XMStoreFloat3(&c.eye, eye);
+    XMStoreFloat4x4(&c.viewProjection,frame.viewProjection);
+    XMStoreFloat3(&c.eye,frame.eye);
     c.selected = selected;
     auto transform = [&](XMMATRIX world) {
         XMStoreFloat4x4(&c.world, world);
@@ -1022,10 +1054,17 @@ bool Renderer::Impl::draw(std::span<const DrawObject> objects, const Camera& cam
     if (!textures || sources.size()!=textures->entries.size() ||
         !std::equal(sources.begin(),sources.end(),textures->entries.begin(),
                     [](const auto& a,const auto& b){return a.first==b.first;})) uploadTextures(sources);
-    std::vector<SceneDraw> draws;
+    const CameraFrame cameraFrame(camera,float(extent.width)/float(extent.height));
+    size_t culled=0;
+    auto& draws=drawList;
+    draws.clear();
     draws.reserve(objects.size());
     for (const auto& object:objects) {
         if (!object.token) continue;
+        if (cameraFrame.outside(object)) {
+            ++culled;
+            continue;
+        }
         if (object.asset) {
             for (const auto& primitive:imported.at(object.asset->digest())) {
                 const auto color=object.asset->colorForSlot(primitive.slot,object.color,object.slotColors);
@@ -1058,7 +1097,7 @@ bool Renderer::Impl::draw(std::span<const DrawObject> objects, const Camera& cam
         std::memcpy(f.overlayVertices.mapped,overlay.data(),bytes);
         check(vmaFlushAllocation(d.allocator,f.overlayVertices.allocation,0,bytes),"Flushing viewport overlay");
     }
-    prepare(f, draws, camera, selected);
+    prepare(f, draws, camera, cameraFrame, selected);
     uint32_t idx{};
     VkResult acquired = vkAcquireNextImageKHR(d.device, chain, waitForFrame ? timeout : 0, f.acquired, {}, &idx);
     if (!waitForFrame && (acquired==VK_NOT_READY || acquired==VK_TIMEOUT)) return false;
@@ -1098,6 +1137,7 @@ bool Renderer::Impl::draw(std::span<const DrawObject> objects, const Camera& cam
     else
         check(result, "Presenting scene");
     f.rendered = true;
+    lastCulled=culled;
     last = current;
     current = (current + 1) % activeFrames;
     drawn = result != VK_ERROR_OUT_OF_DATE_KHR;
@@ -1221,7 +1261,7 @@ std::string Renderer::diagnostics() const {
       << (impl_->format == VK_FORMAT_B8G8R8A8_UNORM ? "BGRA8" : "RGBA8") << " SDR, D32, R32_UINT, "
       << (impl_->presentMode==VK_PRESENT_MODE_MAILBOX_KHR ? "MAILBOX" : "FIFO") << ", "
       << impl_->images.size() << " images, " << impl_->activeFrames << " frame slots"
-      << " | attachment bytes " << impl_->attachmentBytes << ", peak " << impl_->peakAttachmentBytes
+      << " | objects culled " << impl_->lastCulled << " | attachment bytes " << impl_->attachmentBytes << ", peak " << impl_->peakAttachmentBytes
       << ", readback capacity " << impl_->readback.size << " | last CPU submit/present " << impl_->cpuMs
       << " ms, last completed GPU frame " << impl_->gpuMs << " ms, pipeline creation " << impl_->pipelineMs
       << " ms | base-color texture bindings " << (impl_->textures ? impl_->textures->entries.size() : 0)

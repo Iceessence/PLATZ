@@ -97,6 +97,7 @@ public:
                                         std::uint64_t expectedRevision) const;
     CreatedMesh createNativeMesh(std::string name,const NativeMeshSource& source,bool place,
                                  std::uint64_t expectedRevision);
+    std::string makePrimitiveEditable(const std::string& objectId,std::uint64_t expectedRevision);
     void editNativeMesh(const std::string& key,const NativeMeshSource& source,std::uint64_t expectedRevision);
     void renameMeshAsset(const std::string& key,std::string name,std::uint64_t expectedRevision);
     std::string copyNativeMesh(const std::string& key,std::string name,const std::string& detachObject,

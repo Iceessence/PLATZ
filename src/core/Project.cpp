@@ -888,6 +888,29 @@ CreatedMesh Project::createNativeMesh(std::string name,const NativeMeshSource& s
     replace(std::move(next));
     return result;
 }
+std::string Project::makePrimitiveEditable(const std::string& objectId,std::uint64_t expectedRevision) {
+    requireRevision(expectedRevision);
+    const auto* object=find(objectId);
+    if (!object || object->asset.data) fail("Select a built-in primitive to create its editable mesh source.");
+    NativeShape shape;
+    switch (object->mesh) {
+    case Mesh::Cube: shape=NativeShape::Cube; break;
+    case Mesh::Sphere: shape=NativeShape::Sphere; break;
+    case Mesh::Cylinder: shape=NativeShape::Cylinder; break;
+    default: fail("Only built-in primitives support this conversion.");
+    }
+    auto source=defaultNativeMesh(shape);
+    if (shape==NativeShape::Sphere) source.rings=32;
+    if (shape!=NativeShape::Cube) source.segments=64;
+    const MeshReference asset{buildNativeMesh(source),"native:"+newId()};
+    auto next=scene_;
+    auto& converted=next.objects[static_cast<size_t>(object-scene_.objects.data())];
+    converted.mesh=Mesh::Imported;
+    converted.asset=asset;
+    next.meshes.emplace(asset.nativeId,LibraryMesh{object->name,asset,source});
+    replace(std::move(next));
+    return asset.nativeId;
+}
 void Project::editNativeMesh(const std::string& key,const NativeMeshSource& source,std::uint64_t expectedRevision) {
     requireRevision(expectedRevision);
     if (findNativeMesh(scene_.meshes,key).native==source) return;
