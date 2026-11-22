@@ -89,6 +89,8 @@ void StudioWindow::buildMenus() {
         action->setObjectName(ids[i]);
         nativeCreationActions_[i]=action;
     }
+    createImageAction_=createMenu_->addAction(tr("Image / Texture…"),this,[this]{editImage({});});
+    createImageAction_->setObjectName("createNativeImage");
     auto* view = menuBar()->addMenu(tr("&View"));
     view->addAction(sceneDock_->toggleViewAction());
     view->addAction(inspectorDock_->toggleViewAction());
@@ -181,6 +183,7 @@ void StudioWindow::toHub() {
     refreshAssets();
     createMenu_->setEnabled(false);
     for (auto* action:nativeCreationActions_) action->setEnabled(false);
+    createImageAction_->setEnabled(false);
     for (auto* action : {saveAction_,restore_,undo_,redo_,duplicate_,repeat_,erase_,playAction_,homeAction_}) action->setEnabled(false);
     backend_->hide();
     const auto path=QSettings().value("recentProject").toString();
@@ -274,6 +277,7 @@ void StudioWindow::refresh(const std::string& preferredAsset) {
     transformControls_->setEnabled(!runtime_);
     createMenu_->setEnabled(!runtime_);
     for (auto* action:nativeCreationActions_) action->setEnabled(!runtime_);
+    createImageAction_->setEnabled(!runtime_);
     homeAction_->setEnabled(true);
     add_->setEnabled(!runtime_);
     undo_->setEnabled(!runtime_ && project_->canUndo());
@@ -334,6 +338,7 @@ void StudioWindow::syncTransform(const platz::Object& object) {
 void StudioWindow::syncMaterial(const platz::Object* object) {
     const QSignalBlocker block(materialSlot_);
     const QSignalBlocker textureSignals(useTexture_);
+    const QSignalBlocker imageSignals(imageSlot_);
     const auto* asset=object ? object->asset.data.get() : nullptr;
     const auto owner=asset ? object->id+asset->digest() : std::string{};
     materialSlot_->setVisible(asset);
@@ -352,11 +357,23 @@ void StudioWindow::syncMaterial(const platz::Object* object) {
     }
     const int index=materialSlot_->currentIndex();
     const auto* slot=asset && index>=0 ? &asset->materialSlots()[index] : nullptr;
-    const bool usesTexture=slot && asset->textureForSlot(index,object->texturesOff);
-    useTexture_->setVisible(slot && slot->texture);
+    const auto* image=slot ? platz::slotImage(object->images,index) : nullptr;
+    const bool compatible=slot && asset->supportsImageSlot(index);
+    imageSlot_->clear();
+    if (compatible && project_) {
+        imageSlot_->addItem(tr("Default texture"),QString{});
+        for (const auto& [id,entry]:project_->imageLibrary())
+            imageSlot_->addItem(QString::fromStdString(entry.name),QString::fromStdString(id));
+        if (image) imageSlot_->setCurrentIndex(imageSlot_->findData(QString::fromStdString(image->imageId)));
+    }
+    imageSlot_->setVisible(compatible);
+    locateImage_->setVisible(image && !runtime_);
+    updateImageActions();
+    const bool usesTexture=image || (slot && asset->textureForSlot(index,object->texturesOff));
+    useTexture_->setVisible(slot && slot->texture && !image);
     useTexture_->setEnabled(!runtime_ && slot && slot->texture);
     useTexture_->setChecked(usesTexture);
-    textureInfo_->setVisible(slot && slot->hasSourceTexture());
+    textureInfo_->setVisible(image || (slot && slot->hasSourceTexture()));
     color_->setToolTip(usesTexture ? tr("This base color tints the texture.") : QString{});
     if (!object) {
         color_->clear();
@@ -370,7 +387,9 @@ void StudioWindow::syncMaterial(const platz::Object* object) {
     resetSlot_->setEnabled(overridden && !runtime_);
     if (slot) {
         value=asset->colorForSlot(index,value,object->slotColors);
-        if (slot->texture) {
+        if (image) {
+            textureInfo_->setText(tr("Project image · %1 × %2").arg(image->raster->width()).arg(image->raster->height()));
+        } else if (slot->texture) {
             const auto format=slot->texture->encoding==platz::TextureEncoding::Png ? "PNG" : "JPEG";
             textureInfo_->setText(tr("Embedded %1 · %2 × %3").arg(format).arg(slot->texture->width).arg(slot->texture->height));
         } else if (slot->hasSourceTexture()) {

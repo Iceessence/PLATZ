@@ -16,7 +16,8 @@ add_subdirectory(src/assets)
 add_subdirectory(src/core)
 add_subdirectory(src/engine)
 add_library(platz_studio STATIC src/studio/StudioWindow.cpp src/studio/StudioPanels.cpp src/studio/StudioAssets.cpp
-    src/studio/StudioNativeMesh.cpp src/studio/Viewport.cpp src/studio/StudioTransform.cpp
+    src/studio/StudioNativeMesh.cpp src/studio/StudioImages.cpp src/studio/StudioImageEditor.cpp
+    src/studio/RasterCanvas.cpp src/studio/Viewport.cpp src/studio/StudioTransform.cpp
     src/studio/TransformGizmo.cpp src/studio/Appearance.cpp)
 target_include_directories(platz_studio PUBLIC src/studio)
 target_link_libraries(platz_studio PUBLIC Qt6::Widgets platz_core platz_engine)

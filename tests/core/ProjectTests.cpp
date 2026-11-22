@@ -620,6 +620,91 @@ void nativeGeometrySuite(const fs::path& executable) {
     rejects([&]{Project::open(fixture.source);});
     pass("unknown native recipe rejected");
 }
+void nativeImageSuite(const fs::path& executable) {
+    using PlatzRaster=platz::RasterImage;
+    const auto pixels=std::vector<std::uint8_t>{255,8,20,127,32,192,225,0,20,200,72,255,232,180,12,240};
+    const auto original=PlatzRaster::create(2,2,pixels);
+    const auto edited=PlatzRaster::create(1,4,pixels);
+    expect(original->digest()==edited->digest() && !sameRaster(original,edited),
+           "Equal byte sequences caused differently shaped images to compare equal.");
+    rejects([&]{PlatzRaster::create(2,3,pixels);});
+    rejects([&]{PlatzRaster::create(513,1,{});});
+    Fixture fixture;
+    auto project=Project::create(fixture.source,"Editable texture");
+    const auto harbor=project.importMesh(PLATZ_TEST_TEXTURE,project.revision());
+    project.save();
+    const auto legacy=project.objects();
+    const auto target=ImageTarget{harbor,0};
+    expect(project.find(harbor)->asset.data->supportsImageSlot(0),"Textured GLB has no usable coordinates.");
+    rejects([&]{project.createImage("Invalid slot",original,ImageTarget{harbor,2},project.revision());});
+    rejects([&]{project.createImage("Built-in slot",original,ImageTarget{legacy.front().id,0},project.revision());});
+    const auto before=project.revision();
+    auto initial=project.previewImage({},original,target,before);
+    expect(!initial.back().images.empty() && project.imageLibrary().empty() && !project.dirty(),
+           "Creation preview committed or failed to show a bound image.");
+    const auto id=project.createImage("Panel art",original,target,before);
+    const auto cube=project.createNativeMesh("Paint panel",defaultNativeMesh(NativeShape::Cube),true,project.revision());
+    project.assignImage({cube.objectId,0},id,project.revision());
+    project.renameImage(id,"Workshop colors",project.revision());
+    const auto runtime=Runtime(project);
+    const auto beforeEdit=project.revision();
+    const auto preview=project.previewImage(id,edited,{},beforeEdit);
+    expect(preview.at(4).images.front().raster==edited && preview.back().images.front().raster==edited &&
+           project.find(harbor)->images.front().raster==original && project.revision()==beforeEdit,
+           "Image preview did not propagate or changed the authoritative image.");
+    project.editImage(id,edited,beforeEdit);
+    rejects([&]{project.editImage(id,original,beforeEdit);});
+    expect(project.find(harbor)->images.front().raster==edited &&
+           project.find(cube.objectId)->images.front().raster==edited &&
+           runtime.objects().back().images.front().raster==original,
+           "Shared image edit failed to update current material slots or leaked into Play.");
+    project.undo();
+    expect(project.find(harbor)->images.front().raster==original &&
+           project.find(cube.objectId)->images.front().raster==original,"Undo did not restore both material links.");
+    project.redo();
+    rejects([&]{project.removeImage(id,project.revision());});
+    const auto distinct=project.createImage("Independent",edited,target,project.revision());
+    expect(distinct!=id && project.find(harbor)->images.front().imageId==distinct &&
+           project.find(cube.objectId)->images.front().imageId==id,"Making an image slot unique changed another object.");
+    project.assignImage(target,{},project.revision());
+    expect(project.find(harbor)->images.empty() && project.find(harbor)->asset.data->textureForSlot(0,{}),
+           "Detaching a project image did not retain the embedded texture.");
+    project.removeImage(distinct,project.revision());
+    const auto oldMesh=project.meshLibrary().begin()->first;
+    project.assignMesh(cube.objectId,oldMesh,project.revision());
+    expect(project.find(cube.objectId)->images.empty(),"Geometry reassignment retained a stale material binding.");
+    project.undo();
+    project.save();
+    const auto persisted=Project::open(fixture.source);
+    expect(persisted.imageLibrary()==project.imageLibrary() && persisted.objects()==project.objects() &&
+           persisted.imageLibrary().at(id).raster->pixels()==pixels &&
+           persisted.imageLibrary().at(id).raster->height()==4,"Schema v8 failed to preserve exact RGBA pixels or dimensions.");
+    auto previous=persisted;
+    previous.restorePrevious();
+    expect(previous.objects()==legacy && previous.imageLibrary().empty(),"Migration damaged the retained GLB-only revision.");
+    pass("editable v8 RGBA source, shared and unique slots, migration, Undo and Play isolation");
+
+#ifdef _WIN32
+    expect(_wspawnl(_P_WAIT,executable.c_str(),executable.c_str(),L"--interrupt-image",fixture.source.c_str(),nullptr)==73,
+           "Could not run image transaction interruption.");
+    expect(Project::open(fixture.source).imageLibrary()==project.imageLibrary() &&
+           Project::open(fixture.source).objects()==project.objects(),"Image transaction did not roll back.");
+#endif
+    alter(fixture.source,"UPDATE image_blobs SET rgba=zeroblob(length(rgba))");
+    rejects([&]{Project::open(fixture.source);});
+    pass("image transaction rollback and corrupt RGBA rejection");
+
+    Fixture budget;
+    auto bounded=Project::create(budget.source,"Image budget");
+    const auto dense=PlatzRaster::create(512,512,std::vector<std::uint8_t>(512*512*4,127));
+    for (int i=0;i<8;++i) bounded.createImage("High resolution",dense,{},bounded.revision());
+    const auto revision=bounded.revision();
+    rejects([&]{bounded.createImage("Overflow",original,{},revision);});
+    expect(bounded.imageLibrary().size()==8 && bounded.revision()==revision,"Image budget failure changed the project.");
+    bounded.save();
+    expect(Project::open(budget.source).imageLibrary()==bounded.imageLibrary(),"Image-only schema v2 migration failed.");
+    pass("RGBA bounds, budget and standalone image-only save");
+}
 }
 
 int main(int argc, char** argv) {
@@ -629,6 +714,8 @@ int main(int argc, char** argv) {
                           "UPDATE project SET head=777",true);
         if (argc==3 && std::string(argv[1])=="--interrupt-native")
             alter(argv[2],"BEGIN IMMEDIATE; DELETE FROM native_meshes; UPDATE project SET head=777",true);
+        if (argc==3 && std::string(argv[1])=="--interrupt-image")
+            alter(argv[2],"BEGIN IMMEDIATE; DELETE FROM image_blobs; DELETE FROM image_assignments; UPDATE project SET head=777",true);
         if(argc==3 && std::string(argv[1])=="--extend-validation-textures") {
             auto scene=Project::open(argv[2]);
             const auto id=scene.importMesh(PLATZ_TEST_TEXTURE,scene.revision());
@@ -671,6 +758,7 @@ int main(int argc, char** argv) {
         materialSuite();
         textureSuite();
         nativeGeometrySuite(std::filesystem::absolute(argv[0]));
+        nativeImageSuite(std::filesystem::absolute(argv[0]));
         std::cout<<passed<<" Core scenarios passed.\n";
         return 0;
     } catch (const std::exception& e) {

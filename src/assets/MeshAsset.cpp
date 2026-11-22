@@ -1,8 +1,7 @@
 #include "MeshAsset.hpp"
+#include "AssetDigest.hpp"
 #define CGLTF_IMPLEMENTATION
 #include "cgltf.h"
-#include <windows.h>
-#include <bcrypt.h>
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
@@ -17,18 +16,6 @@ namespace {
 void require(bool value, const char* message) {
     if (!value)
         throw std::runtime_error(message);
-}
-std::string digestOf(std::span<const std::uint8_t> bytes) {
-    std::array<unsigned char, 32> hash{};
-    require(BCryptHash(BCRYPT_SHA256_ALG_HANDLE, nullptr, 0, const_cast<PUCHAR>(bytes.data()),
-                       static_cast<ULONG>(bytes.size()), hash.data(), static_cast<ULONG>(hash.size())) >= 0,
-            "Could not hash the mesh source.");
-    std::string out;
-    for (auto b : hash) {
-        out.push_back("0123456789abcdef"[b >> 4]);
-        out.push_back("0123456789abcdef"[b & 15]);
-    }
-    return out;
 }
 std::uint32_t word(std::span<const std::uint8_t> bytes, size_t at) {
     std::uint32_t result{};
@@ -232,6 +219,11 @@ bool appendPrimitive(const cgltf_primitive& primitive, std::vector<MeshVertex>& 
     return hasUv;
 }
 } // namespace
+bool MeshAsset::supportsImageSlot(unsigned slot) const {
+    return slot<slots_.size() && std::none_of(primitives_.begin(),primitives_.end(),[slot](const auto& primitive){
+        return primitive.slot==slot && !primitive.hasUv;
+    });
+}
 const BaseColorTexture* MeshAsset::textureForSlot(std::uint32_t slot,
                                                   std::span<const std::uint32_t> disabled) const {
     const auto& texture = slots_.at(slot).texture;
@@ -298,7 +290,7 @@ std::shared_ptr<const MeshAsset> MeshAsset::decode(std::span<const std::uint8_t>
     raw->buffers[0].data = const_cast<void*>(raw->bin);
     auto asset = std::shared_ptr<MeshAsset>(new MeshAsset);
     asset->source_.assign(source.begin(), source.end());
-    asset->digest_ = digestOf(source);
+    asset->digest_ = assetDigest(source);
     std::map<const cgltf_material*, std::uint32_t> slots;
     const auto& mesh = raw->meshes[0];
     for (size_t i = 0; i < mesh.primitives_count; ++i) {

@@ -45,6 +45,7 @@ class MeshAsset {
     const auto& indices() const { return indices_; }
     const auto& primitives() const { return primitives_; }
     const auto& materialSlots() const { return slots_; }
+    bool supportsImageSlot(unsigned slot) const;
     const BaseColorTexture* textureForSlot(std::uint32_t slot, std::span<const std::uint32_t> disabled) const;
     void readTexturePixels(const BaseColorTexture& texture, std::span<std::uint8_t> rgba) const;
     std::array<float, 3> colorForSlot(std::uint32_t slot, std::array<float, 3> fallback,

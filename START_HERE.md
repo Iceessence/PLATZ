@@ -21,11 +21,19 @@ Double-click a native asset or choose **Manage → Edit mesh parameters** to pre
 
 Save the project to retain the editable recipe and references in schema v7. **Export mesh GLB** writes derived positions, normals, UV0 and indices. The exported GLB imports as a static mesh. Editable parameters, instance transforms and instance tint stay in the .platz project. The existing **Save original GLB** command still extracts the exact bytes of imported assets.
 
+## Paint and assign a texture
+
+Select a native mesh or an imported mesh material slot with UV0. Open **Create → Image / Texture** to paint a project image. The canvas has a pencil, eraser, connected fill, eyedropper, RGBA color picker, zoom and grid. Change the width and height to crop or extend the canvas at its top-left origin. The hex field uses `#RRGGBBAA`. Canvas Undo/Redo works on strokes, fills and dimension changes. Enable **Assign to selected material slot** to see the draft on your mesh. **Create image** or **Apply to image** commits the draft as one project edit. Cancel restores the previous scene.
+
+The **Images** tab in Assets lists editable sources and usage counts. Double-click a source to edit it across its linked material slots. Use **Default texture** in the Inspector to detach a project image and restore the slot’s prior embedded-texture or flat-color setting. Use **Locate image source** to select the source in Assets. Manage offers assignment, rename, duplication, **Make selected slot unique**, and removal of unused images.
+
+Save the project to store exact RGBA pixels, source IDs, and material assignments in schema v8. Use **Export PNG** to write those pixels losslessly and **Import** on the Images tab to bring a PNG back as an independent editable source. Alpha is available in the canvas and PNG. Studio’s Vulkan material samples RGB and remains opaque. Project image assignments stay in the .platz project when exporting geometry to GLB.
+
 ## Import and use existing assets
 
 The **Assets** dock lists embedded GLB meshes and their instance counts. Use **Import…** to keep a source in the library, **Add instance** to place it, or **Assign to selection** to change the geometry of the selected object while preserving its identity, placement, and color. In the validation project you can select **Low spire** in Assets and assign it to **Oblique spire** in the Scene panel. The **Manage** menu can replace every instance from a different GLB, save the original GLB, or remove a mesh with zero uses. These project changes support Undo and Redo.
 
-Use **Add object → Import mesh from GLB…** to import and place in one step. The importer accepts one static mesh with up to 32 indexed triangle primitives and an embedded buffer, up to 2 MiB per file. Imported GLB bytes and derived native GLB sizes share the 8 MiB mesh-library budget. Saving embeds the exact imported source bytes and keeps the .platz project portable. The current build opens older projects and saves imported-asset projects in schema v6 or v7.
+Use **Add object → Import mesh from GLB…** to import and place in one step. The importer accepts one static mesh with up to 32 indexed triangle primitives and an embedded buffer, up to 2 MiB per file. Imported GLB bytes and derived native GLB sizes share the 8 MiB mesh-library budget. Saving embeds the exact imported source bytes and keeps the .platz project portable. Project images have a separate budget of 32 sources and 8 MiB of RGBA pixels.
 
 Select **Color study** in the validation project. Under **Material** in the Inspector, choose **Copper** or **Lagoon** and edit the sRGB hex value or use the swatch to pick a color. Parts that share a GLB material share a slot. A slot edit applies to the selected object. **Reset** restores the imported color, and Undo restores the previous edit. The importer reads RGB base-color factors. The preview renders opaque colors.
 

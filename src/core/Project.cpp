@@ -28,6 +28,13 @@ constexpr std::uintmax_t maxFileBytes = 64 * 1024 * 1024;
 constexpr std::size_t maxMeshSourceBytes = 8u << 20;
 constexpr int applicationId = 0x504C545A;
 constexpr const char* assetsSql = "CREATE TABLE assets(key TEXT PRIMARY KEY,source BLOB NOT NULL)";
+constexpr const char* imageAssignmentsSql =
+    "CREATE TABLE image_assignments(rev INTEGER NOT NULL,object_id TEXT NOT NULL,slot INTEGER NOT NULL,"
+    "image_id TEXT NOT NULL,PRIMARY KEY(rev,object_id,slot))";
+constexpr const char* imageBlobsSql = "CREATE TABLE image_blobs(digest TEXT PRIMARY KEY,rgba BLOB NOT NULL)";
+constexpr const char* imageSourcesSql =
+    "CREATE TABLE image_sources(rev INTEGER NOT NULL,id TEXT NOT NULL,name TEXT NOT NULL,digest TEXT NOT NULL,"
+    "width INTEGER NOT NULL,height INTEGER NOT NULL,PRIMARY KEY(rev,id))";
 constexpr const char* meshLibrarySql =
     "CREATE TABLE mesh_library(rev INTEGER NOT NULL,key TEXT NOT NULL,name TEXT NOT NULL,PRIMARY KEY(rev,key))";
 constexpr const char* nativeMeshesSql =
@@ -133,19 +140,30 @@ void validate(const Object& obj) {
         if (slot>=slots || !obj.asset.data->materialSlots()[slot].hasSourceTexture() ||
             (i && obj.texturesOff[i-1]>=slot)) fail("Invalid base-color texture override.");
     }
+    for (size_t i=0;i<obj.images.size();++i) {
+        const auto& image=obj.images[i];
+        if (!obj.asset.data || !obj.asset.data->supportsImageSlot(image.slot) || !image.raster ||
+            !validId(image.imageId) || (i && obj.images[i-1].slot>=image.slot))
+            fail("Invalid image assignment. The mesh material slot must have UV0.");
+    }
 }
 void validateTextureBudget(const std::vector<Object>& objects) {
     std::set<std::pair<std::string_view,BaseColorTexture>> active;
+    std::set<std::pair<std::string_view,BaseColorTexture>> native;
     size_t bytes=0;
     for (const auto& object:objects) {
         const auto& asset=object.asset.data;
         if (!asset) continue;
         for (std::uint32_t slot=0;slot<asset->materialSlots().size();++slot) {
-            const auto* texture=asset->textureForSlot(slot,object.texturesOff);
-            if (texture && active.emplace(asset->digest(),*texture).second) bytes+=texture->rgbaSize();
+            if (const auto* image=slotImage(object.images,slot)) {
+                if (native.emplace(image->raster->digest(),image->raster->sampling()).second)
+                    bytes+=image->raster->pixels().size();
+            } else if (const auto* texture=asset->textureForSlot(slot,object.texturesOff)) {
+                if (active.emplace(asset->digest(),*texture).second) bytes+=texture->rgbaSize();
+            }
         }
     }
-    if (active.size()>BaseColorTexture::maxActive || bytes>BaseColorTexture::maxActiveBytes)
+    if (active.size()+native.size()>BaseColorTexture::maxActive || bytes>BaseColorTexture::maxActiveBytes)
         fail("Active base-color textures exceed the scene's 64-image or 64 MiB limit.");
 }
 
@@ -226,13 +244,18 @@ struct Metadata { std::string id,scene,name,token; std::uint64_t head; int versi
 Metadata readMeta(Database& db) {
     if (scalar(db,"PRAGMA application_id") != applicationId) fail("This file is not a PLATZ project.");
     auto version = scalar(db,"PRAGMA user_version");
-    if (version<1 || version>7) fail("Unsupported PLATZ project version. Open it with a compatible build.");
+    if (version<1 || version>8) fail("Unsupported PLATZ project version. Open it with a compatible build.");
     Statement schema(db,"SELECT name,sql FROM sqlite_schema WHERE sql IS NOT NULL ORDER BY name");
     auto checkTable = [&](const char* name, const char* definition) {
         if (!schema.row() || schema.str(0) != name || schema.str(1) != definition)
             fail("Unrecognized project schema. The original file was preserved.");
     };
     if (version>=3) checkTable("assets",assetsSql);
+    if (version>=8) {
+        checkTable("image_assignments",imageAssignmentsSql);
+        checkTable("image_blobs",imageBlobsSql);
+        checkTable("image_sources",imageSourcesSql);
+    }
     if (version>=4) checkTable("mesh_library",meshLibrarySql);
     if (version>=7) checkTable("native_meshes",nativeMeshesSql);
     checkTable("objects", objectsSql);
@@ -287,7 +310,39 @@ void readNativeMeshes(Database& db,std::uint64_t rev,MeshLibrary& library,std::s
         library.emplace(key,LibraryMesh{std::move(name),{std::move(geometry),key},source});
     }
 }
-std::vector<Object> readObjects(Database& db, std::uint64_t rev, int version, MeshLibrary& library) {
+void readImages(Database& db,std::uint64_t rev,ImageLibrary& library) {
+    Statement entries(db,"SELECT id,name,digest,width,height FROM image_sources WHERE rev=? LIMIT 33");
+    entries.bind(1,static_cast<std::int64_t>(rev));
+    std::size_t bytes=0;
+    while (entries.row()) {
+        const auto id=entries.str(0), digest=entries.str(2);
+        auto name=entries.str(1);
+        const auto width=entries.integer(3), height=entries.integer(4);
+        if (library.size()>=RasterImage::maxImages || !validId(id) ||
+            width<1 || height<1 || width>RasterImage::maxSide || height>RasterImage::maxSide)
+            fail("Invalid saved image identity, dimensions or catalog size.");
+        validateName(name);
+        const auto size=static_cast<int>(width*height*4);
+        bytes+=size;
+        if (bytes>RasterImage::maxLibraryBytes) fail("Image library exceeds its 8 MiB pixel budget.");
+        Statement image(db,"SELECT rgba FROM image_blobs WHERE digest=?");
+        image.bind(1,digest);
+        if (!image.row() || sqlite3_column_type(image.stmt,0)!=SQLITE_BLOB ||
+            sqlite3_column_bytes(image.stmt,0)!=size) fail("Missing or incomplete image pixels.");
+        const auto* pixels=static_cast<const std::uint8_t*>(sqlite3_column_blob(image.stmt,0));
+        if (!pixels) fail("Could not read image pixels.");
+        auto raster=RasterImage::create(static_cast<unsigned>(width),static_cast<unsigned>(height),
+                                       std::vector<std::uint8_t>(pixels,pixels+size));
+        if (raster->digest()!=digest) fail("Saved image pixels failed the digest check.");
+        library.emplace(id,LibraryImage{std::move(name),std::move(raster)});
+    }
+}
+const LibraryImage& findImage(const ImageLibrary& library,std::string_view id) {
+    const auto found=library.find(id);
+    if (found==library.end()) fail("That image is missing from this project revision.");
+    return found->second;
+}
+std::vector<Object> readObjects(Database& db,std::uint64_t rev,int version,MeshLibrary& library,ImageLibrary& images) {
     std::size_t assetBytes=0;
     if (version>=4) {
         Statement catalog(db,"SELECT key,name FROM mesh_library WHERE rev=? LIMIT 513");
@@ -301,6 +356,7 @@ std::vector<Object> readObjects(Database& db, std::uint64_t rev, int version, Me
         }
     }
     if (version>=7) readNativeMeshes(db,rev,library,assetBytes);
+    if (version>=8) readImages(db,rev,images);
     Statement q(db,"SELECT id,name,mesh,px,py,pz,rx,ry,rz,sx,sy,sz,cr,cg,cb FROM objects WHERE rev=? ORDER BY seq LIMIT 513");
     q.bind(1,static_cast<std::int64_t>(rev));
     std::vector<Object> result;
@@ -355,6 +411,19 @@ std::vector<Object> readObjects(Database& db, std::uint64_t rev, int version, Me
             result[object->second].texturesOff.push_back(static_cast<std::uint32_t>(index));
         }
     }
+    if (version>=8) {
+        Statement assigned(db,"SELECT object_id,slot,image_id FROM image_assignments WHERE rev=? ORDER BY object_id,slot");
+        assigned.bind(1,static_cast<std::int64_t>(rev));
+        while (assigned.row()) {
+            const auto object=ids.find(assigned.str(0));
+            const auto slot=assigned.integer(1);
+            if (object==ids.end() || slot<0 || slot>=MeshAsset::maxPrimitives)
+                fail("Saved image assignment references an invalid material slot.");
+            auto id=assigned.str(2);
+            auto raster=findImage(images,id).raster;
+            result[object->second].images.push_back({static_cast<unsigned>(slot),std::move(id),std::move(raster)});
+        }
+    }
     for (const auto& object:result) validate(object);
     validateTextureBudget(result);
     if (version >= 2) {
@@ -368,12 +437,47 @@ std::vector<Object> readObjects(Database& db, std::uint64_t rev, int version, Me
     return result;
 }
 void requireCurrent(Database& db, const Metadata& meta, const Project& project, const std::string& token,
-                    const std::vector<Object>& savedObjects, const MeshLibrary& savedMeshes) {
+                    const std::vector<Object>& savedObjects,const MeshLibrary& savedMeshes,const ImageLibrary& savedImages) {
     constexpr auto conflict="The saved project changed on disk. Reopen it before saving changes.";
     if (meta.id != project.id() || meta.scene != project.sceneId() || meta.name != project.name() ||
         meta.head != project.savedRevision() || meta.token != token) fail(conflict);
     MeshLibrary observed;
-    if (readObjects(db,meta.head,meta.version,observed)!=savedObjects || observed!=savedMeshes) fail(conflict);
+    ImageLibrary images;
+    if (readObjects(db,meta.head,meta.version,observed,images)!=savedObjects || observed!=savedMeshes ||
+        images!=savedImages) fail(conflict);
+}
+void putImages(Database& db,const ImageLibrary& library,const std::vector<Object>& objects,std::uint64_t rev) {
+    const auto revision=static_cast<std::int64_t>(rev);
+    Statement blob(db,"INSERT INTO image_blobs VALUES(?,?) ON CONFLICT(digest) "
+                      "DO UPDATE SET rgba=excluded.rgba WHERE image_blobs.rgba<>excluded.rgba");
+    Statement member(db,"INSERT INTO image_sources VALUES(?,?,?,?,?,?)");
+    for (const auto& [id,image]:library) {
+        const auto& raster=*image.raster;
+        blob.bind(1,raster.digest());
+        blob.check(sqlite3_bind_blob(blob.stmt,2,raster.pixels().data(),
+                   static_cast<int>(raster.pixels().size()),SQLITE_TRANSIENT));
+        blob.done();
+        blob.check(sqlite3_reset(blob.stmt));
+        member.bind(1,revision);
+        member.bind(2,id);
+        member.bind(3,image.name);
+        member.bind(4,raster.digest());
+        member.bind(5,static_cast<std::int64_t>(raster.width()));
+        member.bind(6,static_cast<std::int64_t>(raster.height()));
+        member.done();
+        member.check(sqlite3_reset(member.stmt));
+    }
+    Statement link(db,"INSERT INTO image_assignments VALUES(?,?,?,?)");
+    for (const auto& object:objects) {
+        for (const auto& image:object.images) {
+            link.bind(1,revision);
+            link.bind(2,object.id);
+            link.bind(3,static_cast<std::int64_t>(image.slot));
+            link.bind(4,image.imageId);
+            link.done();
+            link.check(sqlite3_reset(link.stmt));
+        }
+    }
 }
 void putLibrary(Database& db, const MeshLibrary& library, std::uint64_t rev) {
     Statement member(db,"INSERT INTO mesh_library VALUES(?,?,?)");
@@ -532,6 +636,33 @@ std::string applyNativeGeometry(std::vector<Object>& objects,const MeshReference
     }
     return first;
 }
+void validateImageBudget(const ImageLibrary& images,std::string_view replacing={},std::size_t added=0) {
+    if (images.size()+(added && replacing.empty())>RasterImage::maxImages)
+        fail("Image library supports up to 32 sources.");
+    auto bytes=added;
+    for (const auto& [id,image]:images)
+        if (id!=replacing) bytes+=image.raster->pixels().size();
+    if (bytes>RasterImage::maxLibraryBytes) fail("Image library exceeds its 8 MiB pixel budget.");
+}
+void bindImage(std::vector<Object>& objects,const ImageTarget& target,const std::string& id,Raster raster) {
+    const auto object=std::find_if(objects.begin(),objects.end(),[&](const auto& item){return item.id==target.objectId;});
+    if (object==objects.end() || !object->asset.data || !object->asset.data->supportsImageSlot(target.slot))
+        fail("Select a mesh material slot with UV0 before assigning an image.");
+    auto& slots=object->images;
+    const auto at=std::lower_bound(slots.begin(),slots.end(),target.slot,
+                                  [](const auto& link,unsigned slot){return link.slot<slot;});
+    if (at!=slots.end() && at->slot==target.slot) {
+        if (raster) *at={target.slot,id,std::move(raster)};
+        else slots.erase(at);
+    } else if (raster) {
+        slots.insert(at,{target.slot,id,std::move(raster)});
+    }
+}
+void replaceImagePixels(std::vector<Object>& objects,const std::string& id,const Raster& raster) {
+    for (auto& object:objects)
+        for (auto& link:object.images)
+            if (link.imageId==id) link.raster=raster;
+}
 } // namespace
 
 const char* meshName(Mesh mesh) {
@@ -602,7 +733,7 @@ Project Project::open(const fs::path& path) {
     auto meta=readMeta(db);
     p.id_=meta.id; p.sceneId_=meta.scene; p.name_=meta.name; p.head_=p.revision_=meta.head;
     p.diskToken_=meta.token;
-    p.scene_.objects=readObjects(db,meta.head,meta.version,p.scene_.meshes);
+    p.scene_.objects=readObjects(db,meta.head,meta.version,p.scene_.meshes,p.scene_.images);
     p.saved_=p.scene_;
     p.hasPrevious_ = scalar(db,meta.version == 1 ? "SELECT count(DISTINCT rev) FROM objects" :
                                                    "SELECT count(*) FROM snapshots") > 1;
@@ -632,6 +763,7 @@ void Project::replace(SceneState next) {
     if (next == scene_) return;
     requireRevisionCapacity();
     validateMeshBudget(next.meshes);
+    validateImageBudget(next.images);
     validateTextureBudget(next.objects);
     undo_.push_back(scene_);
     if (undo_.size() > maxUndo) undo_.erase(undo_.begin());
@@ -645,6 +777,7 @@ void Project::apply(const ObjectEdit& proposal) {
         fail("Proposal has invalid identity or outdated source values.");
     auto changed=proposal.after;
     if (changed.asset.data) changed.asset=findMesh(scene_.meshes,changed.asset.key()).asset;
+    for (auto& image:changed.images) image.raster=findImage(scene_.images,image.imageId).raster;
     validate(changed);
     auto next=scene_;
     next.objects[static_cast<size_t>(old-scene_.objects.data())]=std::move(changed);
@@ -692,6 +825,7 @@ void Project::assignMesh(const std::string& objectId, const std::string& digest,
     if (replacement.asset!=object->asset) {
         replacement.slotColors.clear();
         replacement.texturesOff.clear();
+        replacement.images.clear();
     }
     edit(replacement,expectedRevision);
 }
@@ -708,6 +842,7 @@ std::string Project::replaceMeshInstances(const std::string& digest, const std::
             if (object.asset!=replacement) {
                 object.slotColors.clear();
                 object.texturesOff.clear();
+                object.images.clear();
             }
             object.asset=replacement;
             used=true;
@@ -793,6 +928,64 @@ std::string Project::copyNativeMesh(const std::string& key,std::string name,cons
 std::string Project::duplicate(const std::string& objectId, std::uint64_t expectedRevision) {
     return repeat(objectId, expectedRevision, 1, {});
 }
+std::string Project::createImage(std::string name,Raster raster,std::optional<ImageTarget> target,
+                                 std::uint64_t expectedRevision) {
+    requireRevision(expectedRevision);
+    validateName(name);
+    if (!raster) fail("The new image has no pixels.");
+    const auto id=newId();
+    auto next=scene_;
+    next.images.emplace(id,LibraryImage{std::move(name),raster});
+    if (target) bindImage(next.objects,*target,id,std::move(raster));
+    replace(std::move(next));
+    return id;
+}
+void Project::editImage(const std::string& id,Raster raster,std::uint64_t expectedRevision) {
+    requireRevision(expectedRevision);
+    findImage(scene_.images,id);
+    if (!raster) fail("The edited image has no pixels.");
+    auto next=scene_;
+    next.images.at(id).raster=raster;
+    replaceImagePixels(next.objects,id,raster);
+    replace(std::move(next));
+}
+void Project::assignImage(const ImageTarget& target,const std::string& id,std::uint64_t expectedRevision) {
+    requireRevision(expectedRevision);
+    auto raster=id.empty() ? Raster{} : findImage(scene_.images,id).raster;
+    auto next=scene_;
+    bindImage(next.objects,target,id,std::move(raster));
+    replace(std::move(next));
+}
+std::vector<Object> Project::previewImage(const std::string& id,Raster raster,std::optional<ImageTarget> target,
+                                          std::uint64_t expectedRevision) const {
+    requireRevision(expectedRevision);
+    if (!raster) fail("The image preview has no pixels.");
+    if (!id.empty()) findImage(scene_.images,id);
+    validateImageBudget(scene_.images,id,raster->pixels().size());
+    auto objects=scene_.objects;
+    if (target) bindImage(objects,*target,id.empty() ? newId() : id,raster);
+    if (!id.empty()) replaceImagePixels(objects,id,raster);
+    validateTextureBudget(objects);
+    return objects;
+}
+void Project::renameImage(const std::string& id,std::string name,std::uint64_t expectedRevision) {
+    requireRevision(expectedRevision);
+    findImage(scene_.images,id);
+    validateName(name);
+    auto next=scene_;
+    next.images.at(id).name=std::move(name);
+    replace(std::move(next));
+}
+void Project::removeImage(const std::string& id,std::uint64_t expectedRevision) {
+    requireRevision(expectedRevision);
+    findImage(scene_.images,id);
+    for (const auto& object:scene_.objects)
+        if (std::any_of(object.images.begin(),object.images.end(),[&](const auto& link){return link.imageId==id;}))
+            fail("Detach every material slot before removing this image.");
+    auto next=scene_;
+    next.images.erase(id);
+    replace(std::move(next));
+}
 std::vector<Object> Project::previewRepeat(const std::string& objectId, std::uint64_t expectedRevision,
                                            unsigned copies, Vec3 spacing) const {
     requireRevision(expectedRevision);
@@ -850,13 +1043,13 @@ void Project::restorePrevious() {
     if (!hasPrevious_) fail("This project has no previous saved revision.");
     checkFile(path_); Database db(path_,SQLITE_OPEN_READWRITE);
     db.exec("BEGIN"); auto meta=readMeta(db);
-    requireCurrent(db,meta,*this,diskToken_,saved_.objects,saved_.meshes);
+    requireCurrent(db,meta,*this,diskToken_,saved_.objects,saved_.meshes,saved_.images);
     Statement prev(db,meta.version == 1 ? "SELECT MAX(rev) FROM objects WHERE rev < ?" :
                                          "SELECT MAX(rev) FROM snapshots WHERE rev < ?");
     prev.bind(1,static_cast<std::int64_t>(head_));
     if (!prev.row()) fail("Previous saved revision unavailable.");
     SceneState previous;
-    previous.objects=readObjects(db,prev.integer(0),meta.version,previous.meshes);
+    previous.objects=readObjects(db,prev.integer(0),meta.version,previous.meshes,previous.images);
     db.exec("COMMIT");
     replace(std::move(previous));
 }
@@ -865,7 +1058,7 @@ void Project::save() {
     Database db(path_,SQLITE_OPEN_READWRITE);
     db.exec("BEGIN IMMEDIATE");
     auto meta=readMeta(db);
-    requireCurrent(db,meta,*this,diskToken_,saved_.objects,saved_.meshes);
+    requireCurrent(db,meta,*this,diskToken_,saved_.objects,saved_.meshes,saved_.images);
     if (!dirty()) { db.exec("COMMIT"); return; }
     auto nextToken=newId();
     auto savedCopy=scene_;
@@ -874,8 +1067,9 @@ void Project::save() {
         db.exec("INSERT INTO snapshots SELECT rev,count(*) FROM objects GROUP BY rev");
         db.exec("PRAGMA user_version=2");
     }
-    const bool hasLibrary=meta.version>=3 || !scene_.meshes.empty();
-    const bool hasNative=meta.version>=7 || std::any_of(scene_.meshes.begin(),scene_.meshes.end(),
+    const bool hasImages=meta.version>=8 || !scene_.images.empty();
+    const bool hasLibrary=meta.version>=3 || !scene_.meshes.empty() || hasImages;
+    const bool hasNative=meta.version>=7 || hasImages || std::any_of(scene_.meshes.begin(),scene_.meshes.end(),
         [](const auto& entry){return entry.second.native.has_value();});
     if (hasLibrary) {
         if (meta.version<4) {
@@ -905,6 +1099,22 @@ void Project::save() {
         Statement pruneNative(db,"DELETE FROM native_meshes WHERE rev < ?");
         pruneNative.bind(1,static_cast<std::int64_t>(head_));
         pruneNative.done();
+    }
+    if (hasImages) {
+        if (meta.version<8) {
+            db.exec(imageAssignmentsSql);
+            db.exec(imageBlobsSql);
+            db.exec(imageSourcesSql);
+            db.exec("PRAGMA user_version=8");
+        }
+        putImages(db,scene_.images,scene_.objects,revision_);
+        Statement pruneLinks(db,"DELETE FROM image_assignments WHERE rev < ?");
+        pruneLinks.bind(1,static_cast<std::int64_t>(head_));
+        pruneLinks.done();
+        Statement pruneSources(db,"DELETE FROM image_sources WHERE rev < ?");
+        pruneSources.bind(1,static_cast<std::int64_t>(head_));
+        pruneSources.done();
+        db.exec("DELETE FROM image_blobs WHERE digest NOT IN (SELECT digest FROM image_sources)");
     }
     putObjects(db,scene_.objects,revision_);
     Statement update(db,"UPDATE project SET head=?,token=? WHERE singleton=1 AND token=?");

@@ -1,5 +1,6 @@
 #include "StudioWindow.hpp"
 #include "Appearance.hpp"
+#include "RasterCanvas.hpp"
 #include "Viewport.hpp"
 #include <QApplication>
 #include <QAction>
@@ -20,6 +21,7 @@
 #include <QPushButton>
 #include <QSettings>
 #include <QTemporaryDir>
+#include <QTabWidget>
 #include <QTest>
 #include <QTimer>
 #include <QToolButton>
@@ -49,7 +51,7 @@ T* control(QWidget& window, const char* name) {
 Capture settledFrame(Viewport& viewport) {
     // Flush the view invalidation triggered by the preceding normal input event.
     QApplication::processEvents();
-    viewport.repaint();
+    check(viewport.presentScene(),"Could not present the current Studio scene");
     return viewport.captureFrame();
 }
 
@@ -867,6 +869,216 @@ void exerciseNativeGeometry(QTemporaryDir& dir) {
     std::cout<<"Studio native create, cancel, linked edit, Undo/Redo, Play, GLB export and v7 reopen passed\n";
 }
 
+void exerciseNativeImages(QTemporaryDir& dir) {
+    using Clock=std::chrono::steady_clock;
+    const auto path=dir.filePath("Editable image copy.platz");
+    const std::filesystem::path file(path.toStdWString());
+    check(QFile::copy(QString::fromUtf8(PLATZ_VALIDATION_PATH),path),"Cannot copy validation project for image authoring");
+    const auto original=platz::Project::open(file);
+    StudioWindow window;
+    expose(window);
+    fileAction(window,Qt::Key_O,path);
+    auto* view=static_cast<Viewport*>(control<QWidget>(window,"viewport"));
+    auto* tree=control<QListWidget>(window,"sceneTree");
+    auto* images=control<QTreeWidget>(window,"imageLibrary");
+    auto* tabs=control<QTabWidget>(window,"assetTabs");
+    auto* material=control<QComboBox>(window,"baseColorImage");
+    auto key=[&](Qt::Key code,Qt::KeyboardModifiers modifiers=Qt::NoModifier){
+        view->setFocus();
+        QTest::keyClick(view,code,modifiers);
+    };
+    auto acceptMesh=[&](const char* action,bool adjust){
+        QTimer timer;
+        bool accepted=false, updated=false;
+        const auto deadline=Clock::now()+std::chrono::seconds(8);
+        QObject::connect(&timer,&QTimer::timeout,[&]{
+            auto* dialog=qobject_cast<QDialog*>(QApplication::activeModalWidget());
+            if (!dialog || dialog->objectName()!="nativeMeshDialog") return;
+            if (Clock::now()>deadline) { timer.stop(); dialog->reject(); return; }
+            auto* accept=dialog->findChild<QPushButton*>("acceptNativeMesh");
+            if (!accept->isEnabled()) return;
+            if (adjust && !updated) {
+                updated=true;
+                dialog->findChild<QDoubleSpinBox*>("meshWidth")->setValue(1.5);
+                return;
+            }
+            accepted=true;
+            timer.stop();
+            QTest::mouseClick(accept,Qt::LeftButton);
+        });
+        timer.start(20);
+        control<QAction>(window,action)->trigger();
+        timer.stop();
+        check(accepted,"Could not create the native mesh for the image workflow");
+    };
+    acceptMesh("createNativeCube",false);
+    const auto cubeId=tree->currentItem()->data(Qt::UserRole).toString().toStdString();
+    const auto baseline=settledFrame(*view);
+    auto visitEditor=[&](const std::function<void()>& open,bool apply,const std::function<void(QWidget&,RasterCanvas&)>& edit) {
+        QTimer watcher;
+        std::optional<Capture> before,after;
+        QImage output;
+        std::exception_ptr failure;
+        const auto deadline=Clock::now()+std::chrono::seconds(8);
+        Clock::time_point edited;
+        QObject::connect(&watcher,&QTimer::timeout,[&]{
+            auto* dialog=qobject_cast<QDialog*>(QApplication::activeModalWidget());
+            if (!dialog || dialog->objectName()!="imageEditor") return;
+            if (Clock::now()>deadline) {
+                failure=std::make_exception_ptr(std::runtime_error("Image preview did not settle"));
+                watcher.stop();
+                dialog->reject();
+                return;
+            }
+            try {
+                auto* accept=control<QPushButton>(*dialog,"acceptNativeImage");
+                if (!accept->isEnabled()) return;
+                auto* canvas=static_cast<RasterCanvas*>(control<QWidget>(*dialog,"imageCanvas"));
+                if (!before) {
+                    before=settledFrame(*view);
+                    watcher.stop();
+                    edit(*dialog,*canvas);
+                    edited=Clock::now();
+                    watcher.start(15);
+                    return;
+                }
+                watcher.stop();
+                after=settledFrame(*view);
+                output=canvas->image();
+                std::cout<<"Native image final input to synchronous preview capture: "
+                         <<std::chrono::duration<double,std::milli>(Clock::now()-edited).count()<<" ms\n";
+                if (apply) QTest::mouseClick(accept,Qt::LeftButton);
+                else QTest::keyClick(dialog,Qt::Key_Escape);
+            } catch (...) {
+                failure=std::current_exception();
+                watcher.stop();
+                dialog->reject();
+            }
+        });
+        watcher.start(15);
+        open();
+        watcher.stop();
+        if (failure) std::rethrow_exception(failure);
+        check(before && after && before->tokens==after->tokens && before->rgba!=after->rgba,
+              "Canvas draft did not change the Vulkan material while preserving geometry");
+        return std::pair{output,*after};
+    };
+    auto brush=[&](QWidget& dialog,const QString& hex,const char* tool) {
+        auto* color=control<QLineEdit>(dialog,"imageBrushRgba");
+        color->setFocus();
+        color->setText(hex);
+        QTest::mouseClick(control<QToolButton>(dialog,tool),Qt::LeftButton);
+    };
+    const auto created=visitEditor([&]{control<QAction>(window,"createNativeImage")->trigger();},true,
+        [&](QWidget& dialog,RasterCanvas& canvas){
+            check(control<QCheckBox>(dialog,"bindNewImage")->isChecked(),"Native mesh slot did not offer a live assignment");
+            control<QLineEdit>(dialog,"imageName")->setText("Harbor paintwork");
+            control<QSpinBox>(dialog,"imageWidth")->setValue(8);
+            control<QSpinBox>(dialog,"imageHeight")->setValue(8);
+            brush(dialog,"#D84F31FF","imageFill");
+            QTest::mouseClick(&canvas,Qt::LeftButton,{},QPoint(4,4));
+            check(canvas.image().pixelColor(7,7)==QColor("#D84F31"),"Connected fill missed an image pixel");
+            brush(dialog,"#16DDB396","imagePencil");
+            const QPoint from(12,12), to(44,12);
+            QTest::mousePress(&canvas,Qt::LeftButton,{},from);
+            QMouseEvent move(QEvent::MouseMove,to,canvas.mapToGlobal(to),Qt::NoButton,Qt::LeftButton,Qt::NoModifier);
+            QApplication::sendEvent(&canvas,&move);
+            QTest::mouseRelease(&canvas,Qt::LeftButton,{},to);
+            check(canvas.image().pixelColor(3,1)==QColor(22,221,179,150),"Pencil skipped interpolated pixels");
+            QTest::mouseClick(control<QToolButton>(dialog,"undoImageStroke"),Qt::LeftButton);
+            check(canvas.image().pixelColor(3,1)==QColor("#D84F31"),"Canvas Undo did not revert the whole stroke");
+            QTest::mouseClick(control<QToolButton>(dialog,"redoImageStroke"),Qt::LeftButton);
+            QTest::mouseClick(control<QToolButton>(dialog,"imageEyedropper"),Qt::LeftButton);
+            QTest::mouseClick(&canvas,Qt::LeftButton,{},QPoint(28,12));
+            check(control<QLineEdit>(dialog,"imageBrushRgba")->text()=="#16DDB396","Eyedropper lost RGBA channels");
+            QTest::mouseClick(control<QToolButton>(dialog,"imageEraser"),Qt::LeftButton);
+            QTest::mouseClick(&canvas,Qt::LeftButton,{},QPoint(52,52));
+            check(canvas.image().pixelColor(6,6)==QColor(0,0,0,0),"Eraser did not clear a pixel");
+            brush(dialog,"#1280FA00","imagePencil");
+            QTest::mouseClick(&canvas,Qt::LeftButton,{},QPoint(44,44));
+            check(canvas.image().pixelColor(5,5)==QColor(18,128,250,0),"Canvas lost RGB of a transparent pixel");
+        });
+    const auto id=images->currentItem()->data(0,Qt::UserRole).toString();
+    check(images->topLevelItemCount()==1 && images->currentItem()->data(1,Qt::DisplayRole).toInt()==1 &&
+          material->currentData().toString()==id && settledFrame(*view).rgba==created.second.rgba,
+          "Creating the image did not publish its current material assignment");
+    check(platz::Project::open(file).objects()==original.objects(),"Draft image changed the on-disk validation copy");
+    key(Qt::Key_Z,Qt::ControlModifier);
+    check(images->topLevelItemCount()==0,"One project Undo did not remove the created image");
+    check(settledFrame(*view).rgba==baseline.rgba,"Image creation Undo did not restore the baseline Vulkan pixels");
+    key(Qt::Key_Y,Qt::ControlModifier);
+    tabs->setCurrentIndex(1);
+    auto edit=[&]{QTest::mouseClick(control<QPushButton>(window,"editNativeImage"),Qt::LeftButton);};
+    auto addStripe=[&](QWidget& dialog,RasterCanvas& canvas){
+        brush(dialog,"#FFD52CC0","imagePencil");
+        QTest::mouseClick(&canvas,Qt::LeftButton,{},QPoint(12,20));
+        QTest::mouseClick(&canvas,Qt::LeftButton,{},QPoint(20,20));
+        QTest::mouseClick(&canvas,Qt::LeftButton,{},QPoint(28,20));
+    };
+    visitEditor(edit,false,addStripe);
+    check(settledFrame(*view).rgba==created.second.rgba,"Cancelling image editing left draft pixels in the viewport");
+    const auto retinted=visitEditor(edit,true,addStripe);
+    const auto expected=rasterSource(retinted.first);
+    key(Qt::Key_Z,Qt::ControlModifier);
+    check(settledFrame(*view).rgba==created.second.rgba,"One project Undo did not restore the source texture");
+    key(Qt::Key_Y,Qt::ControlModifier);
+    check(settledFrame(*view).rgba==retinted.second.rgba,"Redo failed to restore edited texture pixels");
+
+    const auto png=dir.filePath("Harbor paintwork exported.png");
+    chooseFile(png,[&]{control<QAction>(window,"exportLibraryPng")->trigger();});
+    const auto pngRaster=rasterSource(QImage(png).convertToFormat(QImage::Format_RGBA8888));
+    check(platz::sameRaster(pngRaster,expected),"PNG export lost image dimensions or RGBA");
+    chooseFile(png,[&]{QTest::mouseClick(control<QPushButton>(window,"importImagePng"),Qt::LeftButton);});
+    const auto imported=images->currentItem()->data(0,Qt::UserRole).toString().toStdString();
+    check(imported!=id.toStdString() && images->topLevelItemCount()==2 &&
+          images->currentItem()->data(1,Qt::DisplayRole).toInt()==0,"PNG import did not produce a separate editable source");
+    QTest::mouseClick(control<QPushButton>(window,"locateImageSource"),Qt::LeftButton);
+    check(images->currentItem()->data(0,Qt::UserRole).toString()==id,"Locate Image selected the wrong source");
+    tree->setCurrentRow(6);
+    material->setCurrentIndex(material->findData(id));
+    check(images->currentItem()->data(1,Qt::DisplayRole).toInt()==2,"A second material slot did not link to the image");
+    control<QAction>(window,"detachLibraryImage")->trigger();
+    check(images->currentItem()->data(1,Qt::DisplayRole).toInt()==1,"Detaching an image did not restore the prior slot binding");
+    tree->setCurrentRow(tree->count()-1);
+    QTest::mouseClick(control<QPushButton>(window,"playButton"),Qt::LeftButton);
+    check(!control<QAction>(window,"createNativeImage")->isEnabled() &&
+          !control<QPushButton>(window,"editNativeImage")->isEnabled(),"Image authoring remained enabled during Play");
+    const auto play=settledFrame(*view);
+    QTest::mouseClick(view,Qt::LeftButton,{},visiblePoint(play,tree->count(),*view));
+    check(settledFrame(*view).tokens!=play.tokens,"Textured native mesh failed to interact in Play");
+    key(Qt::Key_Escape);
+    check(settledFrame(*view).rgba==retinted.second.rgba,"Play changed the authored image");
+    tabs->setCurrentIndex(0);
+    acceptMesh("editNativeMesh",true);
+    const auto reshaped=settledFrame(*view);
+    check(reshaped.tokens!=retinted.second.tokens && material->currentData().toString()==id,
+          "Editing native geometry did not preserve its pixel source");
+    key(Qt::Key_S,Qt::ControlModifier);
+    const auto saved=platz::Project::open(file);
+    check(platz::sameRaster(saved.imageLibrary().at(id.toStdString()).raster,expected) &&
+          platz::sameRaster(saved.imageLibrary().at(imported).raster,expected) &&
+          saved.find(cubeId)->images.front().imageId==id.toStdString(),"Reopen lost exact pixels or assignment");
+    check(window.close(),"Image authoring project did not close after save");
+    StudioWindow reopened;
+    expose(reopened);
+    fileAction(reopened,Qt::Key_O,path);
+    control<QListWidget>(reopened,"sceneTree")->setCurrentRow(int(saved.objects().size())-1);
+    auto* reopenedView=static_cast<Viewport*>(control<QWidget>(reopened,"viewport"));
+    check(settledFrame(*reopenedView).rgba==reshaped.rgba &&
+          control<QComboBox>(reopened,"baseColorImage")->currentData().toString()==id,
+          "Reopened Studio lost the material image or rendered different pixels");
+    view=reopenedView;
+    QTest::mouseClick(control<QPushButton>(reopened,"locateImageSource"),Qt::LeftButton);
+    visitEditor([&]{QTest::mouseClick(control<QPushButton>(reopened,"editNativeImage"),Qt::LeftButton);},false,
+        [&](QWidget& dialog,RasterCanvas& canvas){
+            brush(dialog,"#5A99F0FF","imageFill");
+            QTest::mouseClick(&canvas,Qt::LeftButton,{},QPoint(4,4));
+        });
+    check(settledFrame(*reopenedView).rgba==reshaped.rgba,"Cancelling a reopened draft changed the authored pixels");
+    check(reopened.close(),"Reopened image authoring project did not close");
+    std::cout<<"Studio canvas stroke, fill, sample, erase, preview, PNG reimport, Play and v8 reopen passed\n";
+}
+
 void exercise(const QString& path, bool create) {
     const std::filesystem::path file(path.toStdWString());
     std::string projectId, sceneId, editedId;
@@ -1037,6 +1249,10 @@ int main(int argc, char** argv) {
         }
         if (app.arguments().contains("--native-mesh-only")) {
             exerciseNativeGeometry(temp);
+            return 0;
+        }
+        if (app.arguments().contains("--image-only")) {
+            exerciseNativeImages(temp);
             return 0;
         }
         exerciseTransformMath();

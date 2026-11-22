@@ -26,7 +26,8 @@ target_compile_definitions(platz_studio_checks PRIVATE PLATZ_VALIDATION_PATH="${
 add_test(NAME studio_edit_play_reopen COMMAND platz_studio_checks)
 add_test(NAME studio_transform_highdpi COMMAND platz_studio_checks --gizmo-only)
 add_test(NAME studio_native_geometry COMMAND platz_studio_checks --native-mesh-only)
-set(studio_checks studio_edit_play_reopen studio_transform_highdpi studio_native_geometry)
+add_test(NAME studio_native_images COMMAND platz_studio_checks --image-only)
+set(studio_checks studio_edit_play_reopen studio_transform_highdpi studio_native_geometry studio_native_images)
 set_tests_properties(${studio_checks} PROPERTIES LABELS "hardware;interactive" TIMEOUT 90 RUN_SERIAL TRUE)
 set_tests_properties(${studio_checks} PROPERTIES
     ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")

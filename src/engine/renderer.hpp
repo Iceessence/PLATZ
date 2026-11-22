@@ -1,5 +1,6 @@
 #pragma once
 #include "../assets/MeshAsset.hpp"
+#include "../assets/RasterImage.hpp"
 
 #include <array>
 #include <cstdint>
@@ -23,6 +24,7 @@ struct DrawObject {
     std::shared_ptr<const platz::MeshAsset> asset{};
     std::vector<platz::SlotColor> slotColors;
     std::vector<std::uint32_t> texturesOff;
+    std::vector<platz::SlotImage> images;
 };
 
 struct Camera {

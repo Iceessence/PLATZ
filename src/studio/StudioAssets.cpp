@@ -10,6 +10,7 @@
 #include <QMenu>
 #include <QPushButton>
 #include <QSignalBlocker>
+#include <QTabWidget>
 #include <QTreeWidget>
 #include <QVBoxLayout>
 #include <map>
@@ -134,7 +135,11 @@ void StudioWindow::buildAssets() {
     connect(assetList_,&QTreeWidget::itemDoubleClicked,this,[this]{
         if (editMesh_->isEnabled()) editMesh_->trigger();
     });
-    assetsDock_->setWidget(panel);
+    assetTabs_=new QTabWidget;
+    assetTabs_->setObjectName("assetTabs");
+    assetTabs_->addTab(panel,tr("Meshes"));
+    assetTabs_->addTab(buildImageLibrary(),tr("Images"));
+    assetsDock_->setWidget(assetTabs_);
     addDockWidget(Qt::LeftDockWidgetArea,assetsDock_);
     splitDockWidget(sceneDock_,assetsDock_,Qt::Vertical);
 }
@@ -171,6 +176,7 @@ void StudioWindow::refreshAssets(const std::string& preferred) {
             assetList_->setCurrentItem(assetList_->topLevelItem(0));
     }
     updateAssetActions();
+    refreshImages();
 }
 
 void StudioWindow::updateAssetActions() {

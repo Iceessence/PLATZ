@@ -18,7 +18,7 @@ platz::engine::Mesh toEngine(platz::Mesh mesh) {
 }
 platz::engine::DrawObject drawObject(const platz::Object& object,std::uint32_t token) {
     return {token,toEngine(object.mesh),toEngine(object.position),toEngine(object.rotation),toEngine(object.scale),
-            toEngine(object.color),object.asset.data,object.slotColors,object.texturesOff};
+            toEngine(object.color),object.asset.data,object.slotColors,object.texturesOff,object.images};
 }
 }
 
@@ -107,8 +107,7 @@ void Viewport::frameSelection() {
 void Viewport::beginPlay() { cancelDrag(); playing_=true; authoringCamera_=camera_; }
 void Viewport::endPlay() { playing_=false; camera_=authoringCamera_; update(); }
 bool Viewport::presentScene() {
-    repaint();
-    return renderer_ && !failed_;
+    return renderScene();
 }
 platz::engine::Capture Viewport::captureFrame() const {
     if (!renderer_ || failed_) throw std::runtime_error("The GPU viewport is unavailable.");
@@ -134,7 +133,10 @@ void Viewport::retryRenderer() {
     update();
 }
 void Viewport::paintEvent(QPaintEvent*) {
-    if (failed_ || !isVisible() || !width() || !height()) return;
+    renderScene();
+}
+bool Viewport::renderScene() {
+    if (failed_ || !isVisible() || !width() || !height()) return false;
     try {
         if (!renderer_) {
             renderer_ = std::make_unique<platz::engine::Renderer>(reinterpret_cast<void*>(winId()));
@@ -155,7 +157,9 @@ void Viewport::paintEvent(QPaintEvent*) {
             if (onBackend) onBackend(backendText_);
         }
         displayedIds_ = ids_;
+        return true;
     } catch (const std::exception& error) { fail(error); }
+    return false;
 }
 void Viewport::resizeEvent(QResizeEvent*) { cancelDrag(); update(); }
 void Viewport::mousePressEvent(QMouseEvent* event) {

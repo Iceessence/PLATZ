@@ -1,5 +1,6 @@
 #pragma once
 #include "../assets/NativeMesh.hpp"
+#include "../assets/RasterImage.hpp"
 
 #include <cstdint>
 #include <filesystem>
@@ -23,6 +24,7 @@ struct Object {
     MeshReference asset{};
     std::vector<SlotColor> slotColors;
     std::vector<std::uint32_t> texturesOff;
+    std::vector<SlotImage> images;
     void setSlotColor(std::uint32_t slot, std::optional<std::array<float,3>> srgb);
     void setTextureEnabled(std::uint32_t slot,bool enabled);
     bool operator==(const Object&) const = default;
@@ -49,6 +51,18 @@ struct NativeMeshPreview {
 struct CreatedMesh {
     std::string key, objectId;
 };
+struct LibraryImage {
+    std::string name;
+    Raster raster;
+    bool operator==(const LibraryImage& other) const {
+        return name==other.name && sameRaster(raster,other.raster);
+    }
+};
+using ImageLibrary=std::map<std::string,LibraryImage,std::less<>>;
+struct ImageTarget {
+    std::string objectId;
+    unsigned slot{};
+};
 
 class Project {
 public:
@@ -62,6 +76,7 @@ public:
     std::uint64_t savedRevision() const { return head_; }
     const std::vector<Object>& objects() const { return scene_.objects; }
     const MeshLibrary& meshLibrary() const { return scene_.meshes; }
+    const ImageLibrary& imageLibrary() const { return scene_.images; }
     const Object* find(const std::string& objectId) const;
     bool dirty() const;
     bool canUndo() const { return !undo_.empty(); }
@@ -86,6 +101,13 @@ public:
     void renameMeshAsset(const std::string& key,std::string name,std::uint64_t expectedRevision);
     std::string copyNativeMesh(const std::string& key,std::string name,const std::string& detachObject,
                                std::uint64_t expectedRevision);
+    std::string createImage(std::string name,Raster raster,std::optional<ImageTarget> target,std::uint64_t expectedRevision);
+    void editImage(const std::string& id,Raster raster,std::uint64_t expectedRevision);
+    void assignImage(const ImageTarget& target,const std::string& id,std::uint64_t expectedRevision);
+    std::vector<Object> previewImage(const std::string& id,Raster raster,std::optional<ImageTarget> target,
+                                     std::uint64_t expectedRevision) const;
+    void renameImage(const std::string& id,std::string name,std::uint64_t expectedRevision);
+    void removeImage(const std::string& id,std::uint64_t expectedRevision);
     std::string duplicate(const std::string& objectId, std::uint64_t expectedRevision);
     std::vector<Object> previewRepeat(const std::string& objectId, std::uint64_t expectedRevision,
                                       unsigned copies, Vec3 spacing) const;
@@ -104,6 +126,7 @@ private:
     struct SceneState {
         std::vector<Object> objects;
         MeshLibrary meshes;
+        ImageLibrary images;
         bool operator==(const SceneState&) const = default;
     };
     SceneState scene_, saved_;

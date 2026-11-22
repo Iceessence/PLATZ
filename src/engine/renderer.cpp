@@ -230,7 +230,18 @@ struct PresentImage {
     VkSemaphore finished{};
 };
 using TextureKey = std::pair<std::string,platz::BaseColorTexture>;
-using TextureSources = std::map<TextureKey,const platz::MeshAsset*>;
+struct TextureInput {
+    const platz::MeshAsset* embedded{};
+    const platz::RasterImage* raster{};
+};
+using TextureSources = std::map<TextureKey,TextureInput>;
+auto materialTexture(const DrawObject& object,unsigned slot) -> std::optional<std::pair<TextureKey,TextureInput>> {
+    if (const auto* image=platz::slotImage(object.images,slot))
+        return {{TextureKey{"rgba:"+image->raster->digest(),image->raster->sampling()},{nullptr,image->raster.get()}}};
+    if (const auto* texture=object.asset->textureForSlot(slot,object.texturesOff))
+        return {{TextureKey{object.asset->digest(),*texture},{object.asset.get(),nullptr}}};
+    return {};
+}
 struct TextureBinding {
     Image image;
     VkSampler sampler{};
@@ -531,7 +542,11 @@ void Renderer::Impl::uploadTextures(const TextureSources& sources) {
         const auto& asset=key.second;
         const auto start=offset;
         offset+=asset.rgbaSize();
-        try { source->readTexturePixels(asset,pixels.subspan(start,asset.rgbaSize())); }
+        try {
+            if (source.raster)
+                std::ranges::copy(source.raster->pixels(),pixels.begin()+start);
+            else source.embedded->readTexturePixels(asset,pixels.subspan(start,asset.rgbaSize()));
+        }
         catch (const std::runtime_error&) {
             ++batch->warnings;
             target.set=batch->white.set;
@@ -943,8 +958,8 @@ void Renderer::Impl::draw(std::span<const DrawObject> objects, const Camera& cam
     for (const auto& object:objects) {
         if (!object.token || !object.asset) continue;
         for (std::uint32_t slot=0;slot<object.asset->materialSlots().size();++slot)
-            if (const auto* texture=object.asset->textureForSlot(slot,object.texturesOff))
-                sources.try_emplace({object.asset->digest(),*texture},object.asset.get());
+            if (const auto input=materialTexture(object,slot))
+                sources.try_emplace(input->first,input->second);
     }
     if (!textures || sources.size()!=textures->entries.size() ||
         !std::equal(sources.begin(),sources.end(),textures->entries.begin(),
@@ -956,8 +971,8 @@ void Renderer::Impl::draw(std::span<const DrawObject> objects, const Camera& cam
         if (object.asset) {
             for (const auto& primitive:imported.at(object.asset->digest())) {
                 const auto color=object.asset->colorForSlot(primitive.slot,object.color,object.slotColors);
-                const auto* image=primitive.hasUv ? object.asset->textureForSlot(primitive.slot,object.texturesOff) : nullptr;
-                const auto set=image ? textures->entries.at({object.asset->digest(),*image}).set : textures->white.set;
+                const auto texture=primitive.hasUv ? materialTexture(object,primitive.slot) : std::nullopt;
+                const auto set=texture ? textures->entries.at(texture->first).set : textures->white.set;
                 draws.push_back({&object,primitive.range,color,set});
             }
         } else if (const auto kind=static_cast<uint32_t>(object.mesh); kind<3) {

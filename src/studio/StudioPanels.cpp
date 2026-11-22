@@ -417,6 +417,28 @@ void StudioWindow::buildInspector() {
     textureInfo_->setObjectName("baseColorTextureInfo");
     textureInfo_->setWordWrap(true);
     box->addWidget(textureInfo_);
+    imageSlot_=new QComboBox;
+    imageSlot_->setObjectName("baseColorImage");
+    imageSlot_->setAccessibleName(tr("Project image for selected material slot"));
+    imageSlot_->setToolTip(tr("Assign a project image to this material slot. Default restores the slot's existing texture setting."));
+    imageSlot_->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+    imageSlot_->setMinimumContentsLength(12);
+    box->addWidget(imageSlot_);
+    locateImage_=button(tr("Locate image source"),"locateImageSource");
+    box->addWidget(locateImage_,0,Qt::AlignLeft);
+    connect(imageSlot_,&QComboBox::currentIndexChanged,this,[this](int row){
+        if (refreshing_ || row<0) return;
+        if (const auto target=currentImageTarget()) protectedCall([&]{
+            project_->assignImage(*target,imageSlot_->itemData(row).toString().toStdString(),project_->revision());
+            refresh();
+            notify(tr("Updated the material image assignment."));
+        });
+    });
+    connect(locateImage_,&QPushButton::clicked,this,[this]{
+        if (const auto target=currentImageTarget())
+            if (const auto* image=platz::slotImage(project_->find(target->objectId)->images,target->slot))
+                showImage(image->imageId);
+    });
     connect(useTexture_,&QCheckBox::toggled,this,[this](bool enabled){
         const auto slot=materialSlot_->currentIndex();
         if (slot>=0) applyEdit([slot,enabled](platz::Object& object){object.setTextureEnabled(slot,enabled);});

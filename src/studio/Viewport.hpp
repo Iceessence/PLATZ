@@ -40,6 +40,7 @@ protected:
     void wheelEvent(QWheelEvent*) override;
     void keyPressEvent(QKeyEvent*) override;
 private:
+    bool renderScene();
     std::unique_ptr<platz::engine::Renderer> renderer_;
     platz::engine::Camera camera_, authoringCamera_;
     std::vector<platz::engine::DrawObject> draws_;

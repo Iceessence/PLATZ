@@ -40,7 +40,8 @@ void profile(const std::filesystem::path& file) {
         case platz::Mesh::Imported: mesh = Mesh::Imported; break;
         }
         scene.push_back({static_cast<unsigned>(scene.size()) + 1, mesh, vector(object.position),
-            vector(object.rotation), vector(object.scale), vector(object.color),object.asset.data,object.slotColors,object.texturesOff});
+            vector(object.rotation), vector(object.scale), vector(object.color),object.asset.data,object.slotColors,
+            object.texturesOff,object.images});
     }
     TestSurface surface;
     check(surface.handle && SetWindowPos(surface.handle,nullptr,0,0,1280,720,SWP_NOZORDER|SWP_NOACTIVATE),
@@ -255,6 +256,31 @@ void run() {
     if (mesh.asset->materialSlots()[0].texture)
         check(gpu.textureWarnings()==1,"A GPU upload decode fallback was not surfaced.");
     std::cout<<"PNG/JPEG orientation, UV0, sRGB sampling, per-slot isolation, texture re-upload and corrupt-raster fallback passed\n";
+
+    mesh.asset=platz::MeshAsset::load(PLATZ_TEST_TEXTURE);
+    mesh.images={{0,"project image",platz::RasterImage::create(2,2,{
+        0,240,0,255, 0,240,0,255, 0,240,0,255, 0,240,0,255})}};
+    gpu.draw(std::span(&mesh,1),meshCamera);
+    const auto projectImage=gpu.capture();
+    check(projectImage.tokens==textured.tokens && projectImage.rgba!=textured.rgba,
+          "Assigned RGBA image did not replace the embedded base color.");
+    std::size_t greenPixels=0;
+    for (size_t i=0;i<projectImage.tokens.size();++i) {
+        const auto* rgb=&projectImage.rgba[4*i];
+        if (i%projectImage.width>=projectImage.width/2)
+            check(std::equal(rgb,rgb+4,&textured.rgba[4*i]),"Project image replaced the neighboring texture.");
+        else if (projectImage.tokens[i]==mesh.token && rgb[1]>rgb[0]+75 && rgb[1]>rgb[2]+75)
+            ++greenPixels;
+    }
+    check(greenPixels>100,"Native RGBA pixels were not sampled on the assigned slot.");
+    mesh.images.front().raster=platz::RasterImage::create(2,2,{
+        0,240,0,0, 0,240,0,0, 0,240,0,0, 0,240,0,0});
+    gpu.draw(std::span(&mesh,1),meshCamera);
+    check(gpu.capture().rgba==projectImage.rgba,"Opaque material unexpectedly blended native alpha.");
+    mesh.images.clear();
+    gpu.draw(std::span(&mesh,1),meshCamera);
+    check(gpu.capture().rgba==textured.rgba,"Detaching a native image failed to restore the embedded texture.");
+    std::cout<<"Project RGBA texture upload, opaque alpha behavior and per-slot isolation passed\n";
 
     auto cylinder=platz::defaultNativeMesh(platz::NativeShape::Cylinder);
     cylinder.size={1,1.6f,1};
