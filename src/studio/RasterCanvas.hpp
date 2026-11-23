@@ -21,16 +21,20 @@ public:
     void redo();
     std::function<void()> changed;
     std::function<void(QColor)> sampled;
+    std::function<void(QPoint)> revealPixel;
 protected:
     void paintEvent(QPaintEvent*) override;
     void mousePressEvent(QMouseEvent*) override;
     void mouseMoveEvent(QMouseEvent*) override;
     void mouseReleaseEvent(QMouseEvent*) override;
+    void keyPressEvent(QKeyEvent*) override;
     bool event(QEvent*) override;
 private:
     std::optional<QPoint> pixel(QPointF point) const;
     bool line(QPoint from,QPoint to,QColor color);
     bool fill(QPoint at,QColor color);
+    void beginStroke(QPoint at);
+    QPoint keyboardPixel_;
     void finishStroke();
     void record(QImage before);
     void redraw();

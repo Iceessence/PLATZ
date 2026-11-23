@@ -1,8 +1,12 @@
 #include "RasterCanvas.hpp"
 #include <QMouseEvent>
+#include <QKeyEvent>
 #include <QPaintEvent>
 #include <QPainter>
 #include <algorithm>
+#include <array>
+#include <bit>
+#include <cstring>
 #include <cmath>
 #include <cstdlib>
 #include <utility>
@@ -34,7 +38,8 @@ RasterCanvas::RasterCanvas(QImage image,QWidget* parent)
     : QWidget(parent),image_(std::move(image)) {
     setObjectName("imageCanvas");
     setAccessibleName(tr("RGBA pixel canvas"));
-    setAccessibleDescription(tr("Use the mouse to draw or sample pixels. Width, height, color and history have keyboard controls."));
+    setAccessibleDescription(tr("Use arrow keys to move the pixel cursor and Space to use the selected tool. Mouse input can draw strokes."));
+    setFocusPolicy(Qt::StrongFocus);
     setMouseTracking(true);
     setCursor(Qt::CrossCursor);
     setZoom(zoom_);
@@ -45,6 +50,8 @@ void RasterCanvas::setTool(Tool tool) {
 }
 void RasterCanvas::setZoom(int zoom) {
     zoom_=zoom;
+    keyboardPixel_.setX(std::min(keyboardPixel_.x(),image_.width()-1));
+    keyboardPixel_.setY(std::min(keyboardPixel_.y(),image_.height()-1));
     setFixedSize(image_.size()*zoom_);
     update();
 }
@@ -59,6 +66,13 @@ void RasterCanvas::paintEvent(QPaintEvent* event) {
         painter.setPen(QColor(20,33,39,85));
         for (int x=zoom_;x<width();x+=zoom_) painter.drawLine(x,0,x,height());
         for (int y=zoom_;y<height();y+=zoom_) painter.drawLine(0,y,width(),y);
+    }
+    if (hasFocus()) {
+        const QRect cursor(keyboardPixel_*zoom_,QSize(zoom_,zoom_));
+        painter.fillRect(cursor.adjusted(-1,-1,1,1),QColor(245,252,255,125));
+        painter.drawImage(cursor,image_,QRect(keyboardPixel_,QSize(1,1)));
+        painter.setPen(Qt::black);
+        painter.drawRect(cursor.adjusted(-1,-1,0,0));
     }
 }
 std::optional<QPoint> RasterCanvas::pixel(QPointF point) const {
@@ -83,18 +97,38 @@ bool RasterCanvas::line(QPoint from,QPoint to,QColor color) {
     }
 }
 bool RasterCanvas::fill(QPoint at,QColor color) {
-    const auto original=image_.pixelColor(at);
-    if (original==color) return false;
-    std::vector<QPoint> queue{at};
-    image_.setPixelColor(at,color);
-    const std::array sides{QPoint(1,0),QPoint(-1,0),QPoint(0,1),QPoint(0,-1)};
-    for (size_t i=0;i<queue.size();++i) {
-        const auto current=queue[i];
-        for (const auto direction:sides) {
-            const auto neighbor=current+direction;
-            if (image_.rect().contains(neighbor) && image_.pixelColor(neighbor)==original) {
-                image_.setPixelColor(neighbor,color);
-                queue.push_back(neighbor);
+    auto* bytes=image_.bits();
+    const auto stride=image_.bytesPerLine();
+    auto address=[&](int x,int y){return bytes+y*stride+4*x;};
+    auto pixelAt=[&](int x,int y){
+        std::uint32_t value;
+        std::memcpy(&value,address(x,y),sizeof value);
+        return value;
+    };
+    const auto original=pixelAt(at.x(),at.y());
+    const auto replacement=std::bit_cast<std::uint32_t>(std::array{
+        uchar(color.red()),uchar(color.green()),uchar(color.blue()),uchar(color.alpha())});
+    if (original==replacement) return false;
+
+    // Visit one seed per connected run. Keep the canvas in native RGBA byte order.
+    const int width=image_.width(),height=image_.height();
+    std::vector<QPoint> seeds{at};
+    while (!seeds.empty()) {
+        const auto seed=seeds.back();
+        seeds.pop_back();
+        const int y=seed.y();
+        if (pixelAt(seed.x(),y)!=original) continue;
+        int left=seed.x(),right=seed.x();
+        while (left>0 && pixelAt(left-1,y)==original) --left;
+        while (right+1<width && pixelAt(right+1,y)==original) ++right;
+        for (int x=left;x<=right;++x) std::memcpy(address(x,y),&replacement,sizeof replacement);
+        for (const int neighbor:{y-1,y+1}) {
+            if (neighbor<0 || neighbor>=height) continue;
+            bool inRun=false;
+            for (int x=left;x<=right;++x) {
+                const bool matches=pixelAt(x,neighbor)==original;
+                if (matches && !inRun) seeds.emplace_back(x,neighbor);
+                inRun=matches;
             }
         }
     }
@@ -103,19 +137,23 @@ bool RasterCanvas::fill(QPoint at,QColor color) {
 void RasterCanvas::mousePressEvent(QMouseEvent* event) {
     const auto at=pixel(event->position());
     if (!at || event->button()!=Qt::LeftButton) return;
+    keyboardPixel_=*at;
+    beginStroke(*at);
+}
+void RasterCanvas::beginStroke(QPoint at) {
     if (tool_==Tool::Eyedropper) {
-        if (sampled) sampled(image_.pixelColor(*at));
+        if (sampled) sampled(image_.pixelColor(at));
         return;
     }
     finishStroke();
     beforeStroke_=image_;
     if (tool_==Tool::Fill) {
-        if (fill(*at,color_)) redraw();
+        if (fill(at,color_)) redraw();
         finishStroke();
         return;
     }
     last_=at;
-    if (line(*at,*at,tool_==Tool::Eraser ? QColor(0,0,0,0) : color_)) redraw();
+    if (line(at,at,tool_==Tool::Eraser ? QColor(0,0,0,0) : color_)) redraw();
 }
 void RasterCanvas::mouseMoveEvent(QMouseEvent* event) {
     if (beforeStroke_.isNull()) return;
@@ -127,7 +165,28 @@ void RasterCanvas::mouseMoveEvent(QMouseEvent* event) {
 void RasterCanvas::mouseReleaseEvent(QMouseEvent* event) {
     if (event->button()==Qt::LeftButton) finishStroke();
 }
+void RasterCanvas::keyPressEvent(QKeyEvent* event) {
+    QPoint shift;
+    switch (event->key()) {
+    case Qt::Key_Left: shift={-1,0}; break;
+    case Qt::Key_Right: shift={1,0}; break;
+    case Qt::Key_Up: shift={0,-1}; break;
+    case Qt::Key_Down: shift={0,1}; break;
+    case Qt::Key_Space:
+        beginStroke(keyboardPixel_);
+        finishStroke();
+        event->accept();
+        return;
+    default: QWidget::keyPressEvent(event); return;
+    }
+    const auto moved=keyboardPixel_+shift;
+    keyboardPixel_={std::clamp(moved.x(),0,image_.width()-1),std::clamp(moved.y(),0,image_.height()-1)};
+    if (revealPixel) revealPixel(keyboardPixel_*zoom_+QPoint(zoom_/2,zoom_/2));
+    update();
+    event->accept();
+}
 bool RasterCanvas::event(QEvent* event) {
+    if (event->type()==QEvent::FocusIn || event->type()==QEvent::FocusOut) update();
     if (event->type()==QEvent::Hide || event->type()==QEvent::UngrabMouse || event->type()==QEvent::WindowDeactivate)
         finishStroke();
     return QWidget::event(event);

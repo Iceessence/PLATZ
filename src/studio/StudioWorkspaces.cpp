@@ -130,7 +130,8 @@ void StudioWindow::applyWorkspacePreset(const QString& id) {
         QTimer::singleShot(0,this,[this]{
             if (!project_ || activeWorkspace_!="materials") return;
             auto* scroll=inspectorDock_->findChild<QScrollArea*>("inspectorScroll");
-            scroll->ensureWidgetVisible(scroll->findChild<QLabel*>("materialHeading"),0,32);
+            if (auto* section=scroll->findChild<QWidget*>("inspectorMaterialToggle"))
+                scroll->ensureWidgetVisible(section,0,32);
         });
     } else {
         resizeDocks({sceneDock_,inspectorDock_},{220,292},Qt::Horizontal);
@@ -150,6 +151,7 @@ void StudioWindow::applyWorkspace() {
         applyWorkspacePreset(current->id);
     }
     tools_->show();
+    syncWorkspaceTools();
     workspacePicker_->setToolTip(tr("Active workspace: %1. Switch to another layout here.").arg(current->name));
     {
         const QSignalBlocker blocker(workspacePicker_);

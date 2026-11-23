@@ -9,6 +9,7 @@
 #include <QDialogButtonBox>
 #include <QFormLayout>
 #include <QSpinBox>
+#include <QSplitter>
 #include <QCoreApplication>
 #include <QDir>
 #include <QDockWidget>
@@ -113,9 +114,6 @@ void section(QVBoxLayout* layout, const QString& text) {
     layout->addSpacing(10);
     layout->addWidget(label(text,"section"));
 }
-QString validationPath() {
-    return QDir::cleanPath(QCoreApplication::applicationDirPath() + "/../../projects/PLATZ Validation.platz");
-}
 }
 
 void StudioWindow::buildHub() {
@@ -167,10 +165,10 @@ void StudioWindow::buildHub() {
         openProject(QSettings().value("recentProject").toString());
     });
     section(body,tr("ENGINE VALIDATION"));
-    auto* validation = button(tr("Open PLATZ Validation"),"openValidation");
-    validation->setToolTip(QDir::toNativeSeparators(validationPath()));
+    auto* validation=button(tr("Open validation workspace"),"openValidation");
+    validation->setToolTip(tr("Continue in the local working copy of the same PLATZ Validation project."));
     body->addWidget(validation,0,Qt::AlignLeft);
-    connect(validation,&QPushButton::clicked,this,[this]{ openProject(validationPath()); });
+    connect(validation,&QPushButton::clicked,this,&StudioWindow::openValidationProject);
     outer->addWidget(card);
     pages_->addWidget(hub_);
 }
@@ -218,8 +216,12 @@ void StudioWindow::buildStudio() {
     connect(save_,&QPushButton::clicked,this,[this]{saveChanges();});
     connect(play_,&QPushButton::clicked,this,&StudioWindow::togglePlay);
 
-    auto* center = new QWidget;
-    auto* layout = new QVBoxLayout(center);
+    workSurface_=new QSplitter(Qt::Horizontal);
+    workSurface_->setObjectName("studioWorkSurface");
+    workSurface_->setChildrenCollapsible(false);
+    workSurface_->setHandleWidth(5);
+    auto* center=new QWidget(workSurface_);
+    auto* layout=new QVBoxLayout(center);
     layout->setContentsMargins(0,0,0,0);
     layout->setSpacing(0);
     auto* bar = new QHBoxLayout;
@@ -235,12 +237,27 @@ void StudioWindow::buildStudio() {
     transformControls_=new QWidget;
     buildTransformControls(transformControls_);
     layout->addWidget(transformControls_);
+    textureTools_=new QWidget;
+    textureTools_->setObjectName("textureWorkspaceTools");
+    auto* textureRow=new QHBoxLayout(textureTools_);
+    textureRow->setContentsMargins(10,4,10,6);
+    auto* createTexture=button(tr("New image…"),"textureWorkspaceCreate");
+    auto* openImages=button(tr("Image library"),"textureWorkspaceLibrary");
+    connect(createTexture,&QPushButton::clicked,this,[this]{editImage({});});
+    connect(openImages,&QPushButton::clicked,this,[this]{showImage({});});
+    textureRow->addWidget(createTexture);
+    textureRow->addWidget(openImages);
+    textureRow->addStretch();
+    textureTools_->hide();
+    layout->addWidget(textureTools_);
     viewport_ = new Viewport;
     layout->addWidget(viewport_,1);
     controls_ = label(tr("RMB orbit   ·   MMB pan   ·   Wheel zoom   ·   F frame"),"minor");
     controls_->setContentsMargins(10,6,6,6);
+    controls_->setSizePolicy(QSizePolicy::Ignored,QSizePolicy::Preferred);
     layout->addWidget(controls_);
-    pages_->addWidget(center);
+    workSurface_->addWidget(center);
+    pages_->addWidget(workSurface_);
     viewport_->onBackend = [this](QString adapter){backend_->setText(QString("Vulkan 1.4  ·  %1").arg(adapter));};
     viewport_->onError = [this](QString error){
         cancelPreview();

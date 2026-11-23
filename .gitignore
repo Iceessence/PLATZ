@@ -2,6 +2,7 @@
 /.deps/
 /out/
 /test-results/
+/.local/
 *.platz-journal
 *.platz-wal
 *.platz-shm

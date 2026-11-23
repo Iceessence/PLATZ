@@ -1494,54 +1494,44 @@ void exerciseNativeImages(QTemporaryDir& dir) {
     acceptMesh("createNativeCube",false);
     const auto cubeId=tree->currentItem()->data(0,Qt::UserRole).toString().toStdString();
     const auto baseline=settledFrame(*view);
+    auto authoredFrame=[&]{
+        auto frame=settledFrame(*view);
+        const auto scale=view->devicePixelRatioF();
+        for (int attempt=0;attempt<3 && (frame.width!=baseline.width || frame.height!=baseline.height);++attempt) {
+            // Compare real Vulkan pixels at a common client size after Qt reconciles dock geometry.
+            const auto offset=QSize(qRound((double(baseline.width)-frame.width)/scale),
+                                    qRound((double(baseline.height)-frame.height)/scale));
+            auto* host=view->window();
+            host->resize(host->size()+offset);
+            frame=settledFrame(*view);
+        }
+        check(frame.width==baseline.width && frame.height==baseline.height,"Could not match the authored comparison extent");
+        return frame;
+    };
     auto visitEditor=[&](const std::function<void()>& open,bool apply,const std::function<void(QWidget&,RasterCanvas&)>& edit) {
-        QTimer watcher;
-        std::optional<Capture> before,after;
-        QImage output;
-        std::exception_ptr failure;
-        const auto deadline=Clock::now()+std::chrono::seconds(8);
-        Clock::time_point edited;
-        QObject::connect(&watcher,&QTimer::timeout,[&]{
-            auto* dialog=qobject_cast<QDialog*>(QApplication::activeModalWidget());
-            if (!dialog || dialog->objectName()!="imageEditor") return;
-            if (Clock::now()>deadline) {
-                failure=std::make_exception_ptr(std::runtime_error("Image preview did not settle"));
-                watcher.stop();
-                dialog->reject();
-                return;
-            }
-            try {
-                auto* accept=control<QPushButton>(*dialog,"acceptNativeImage");
-                if (!accept->isEnabled()) return;
-                auto* canvas=static_cast<RasterCanvas*>(control<QWidget>(*dialog,"imageCanvas"));
-                if (!before) {
-                    before=settledFrame(*view);
-                    watcher.stop();
-                    edit(*dialog,*canvas);
-                    edited=Clock::now();
-                    watcher.start(15);
-                    return;
-                }
-                watcher.stop();
-                after=settledFrame(*view);
-                output=canvas->image();
-                std::cout<<"Native image final input to synchronous preview capture: "
-                         <<std::chrono::duration<double,std::milli>(Clock::now()-edited).count()<<" ms\n";
-                if (apply) QTest::mouseClick(accept,Qt::LeftButton);
-                else QTest::keyClick(dialog,Qt::Key_Escape);
-            } catch (...) {
-                failure=std::current_exception();
-                watcher.stop();
-                dialog->reject();
-            }
-        });
-        watcher.start(15);
         open();
-        watcher.stop();
-        if (failure) std::rethrow_exception(failure);
-        check(before && after && before->tokens==after->tokens && before->rgba!=after->rgba,
+        auto* host=view->window();
+        auto* editor=control<QWidget>(*host,"imageEditor");
+        auto* accept=control<QPushButton>(*editor,"acceptNativeImage");
+        check(editor->isVisible() && view->isVisible() && !QApplication::activeModalWidget() &&
+              !control<QPushButton>(*host,"playButton")->isEnabled(),
+              "Image draft did not share the main Studio surface or block conflicting Play");
+        check(QTest::qWaitFor([&]{return accept->isEnabled();},8000),"Image preview did not settle");
+        const auto before=settledFrame(*view);
+        auto* canvas=static_cast<RasterCanvas*>(control<QWidget>(*editor,"imageCanvas"));
+        edit(*editor,*canvas);
+        const auto edited=Clock::now();
+        check(QTest::qWaitFor([&]{return accept->isEnabled();},8000),"Edited preview did not settle");
+        const auto after=settledFrame(*view);
+        const auto output=canvas->image();
+        std::cout<<"Native image final input to synchronous preview capture: "
+                 <<std::chrono::duration<double,std::milli>(Clock::now()-edited).count()<<" ms\n";
+        check(before.tokens==after.tokens && before.rgba!=after.rgba,
               "Canvas draft did not change the Vulkan material while preserving geometry");
-        return std::pair{output,*after};
+        if (apply) QTest::mouseClick(accept,Qt::LeftButton);
+        else QTest::keyClick(editor,Qt::Key_Escape);
+        check(!host->findChild<QWidget*>("imageEditor"),"Image draft did not close inside Studio");
+        return std::pair{output,authoredFrame()};
     };
     auto brush=[&](QWidget& dialog,const QString& hex,const char* tool) {
         auto* color=control<QLineEdit>(dialog,"imageBrushRgba");
@@ -1576,17 +1566,20 @@ void exerciseNativeImages(QTemporaryDir& dir) {
             QTest::mouseClick(&canvas,Qt::LeftButton,{},QPoint(52,52));
             check(canvas.image().pixelColor(6,6)==QColor(0,0,0,0),"Eraser did not clear a pixel");
             brush(dialog,"#1280FA00","imagePencil");
-            QTest::mouseClick(&canvas,Qt::LeftButton,{},QPoint(44,44));
+            canvas.setFocus();
+            QTest::keyClick(&canvas,Qt::Key_Left);
+            QTest::keyClick(&canvas,Qt::Key_Up);
+            QTest::keyClick(&canvas,Qt::Key_Space);
             check(canvas.image().pixelColor(5,5)==QColor(18,128,250,0),"Canvas lost RGB of a transparent pixel");
         });
     const auto id=images->currentItem()->data(0,Qt::UserRole).toString();
     check(images->topLevelItemCount()==1 && images->currentItem()->data(1,Qt::DisplayRole).toInt()==1 &&
-          material->currentData().toString()==id && settledFrame(*view).rgba==created.second.rgba,
+          material->currentData().toString()==id && authoredFrame().rgba==created.second.rgba,
           "Creating the image did not publish its current material assignment");
     check(platz::Project::open(file).objects()==original.objects(),"Draft image changed the on-disk validation copy");
     key(Qt::Key_Z,Qt::ControlModifier);
     check(images->topLevelItemCount()==0,"One project Undo did not remove the created image");
-    check(settledFrame(*view).rgba==baseline.rgba,"Image creation Undo did not restore the baseline Vulkan pixels");
+    check(authoredFrame().rgba==baseline.rgba,"Image creation Undo did not restore the baseline Vulkan pixels");
     key(Qt::Key_Y,Qt::ControlModifier);
     tabs->setCurrentIndex(1);
     auto edit=[&]{QTest::mouseClick(control<QPushButton>(window,"editNativeImage"),Qt::LeftButton);};
@@ -1597,13 +1590,13 @@ void exerciseNativeImages(QTemporaryDir& dir) {
         QTest::mouseClick(&canvas,Qt::LeftButton,{},QPoint(28,20));
     };
     visitEditor(edit,false,addStripe);
-    check(settledFrame(*view).rgba==created.second.rgba,"Cancelling image editing left draft pixels in the viewport");
+    check(authoredFrame().rgba==created.second.rgba,"Cancelling image editing left draft pixels in the viewport");
     const auto retinted=visitEditor(edit,true,addStripe);
     const auto expected=rasterSource(retinted.first);
     key(Qt::Key_Z,Qt::ControlModifier);
-    check(settledFrame(*view).rgba==created.second.rgba,"One project Undo did not restore the source texture");
+    check(authoredFrame().rgba==created.second.rgba,"One project Undo did not restore the source texture");
     key(Qt::Key_Y,Qt::ControlModifier);
-    check(settledFrame(*view).rgba==retinted.second.rgba,"Redo failed to restore edited texture pixels");
+    check(authoredFrame().rgba==retinted.second.rgba,"Redo failed to restore edited texture pixels");
 
     const auto png=dir.filePath("Harbor paintwork exported.png");
     chooseFile(png,[&]{control<QAction>(window,"exportLibraryPng")->trigger();});
@@ -1638,10 +1631,10 @@ void exerciseNativeImages(QTemporaryDir& dir) {
     clickViewport(view,visiblePoint(play,tree->topLevelItemCount(),*view));
     check(settledFrame(*view).tokens!=play.tokens,"Textured native mesh failed to interact in Play");
     key(Qt::Key_Escape);
-    check(settledFrame(*view).rgba==retinted.second.rgba,"Play changed the authored image");
+    check(authoredFrame().rgba==retinted.second.rgba,"Play changed the authored image");
     tabs->setCurrentIndex(0);
     acceptMesh("editNativeMesh",true);
-    const auto reshaped=settledFrame(*view);
+    const auto reshaped=authoredFrame();
     check(reshaped.tokens!=retinted.second.tokens && material->currentData().toString()==id,
           "Editing native geometry did not preserve its pixel source");
     key(Qt::Key_S,Qt::ControlModifier);
@@ -1655,17 +1648,17 @@ void exerciseNativeImages(QTemporaryDir& dir) {
     fileAction(reopened,Qt::Key_O,path);
     selectSceneRow(control<QTreeWidget>(reopened,"sceneTree"),int(saved.objects().size())-1);
     auto* reopenedView=static_cast<Viewport*>(control<QWidget>(reopened,"viewport"));
-    check(settledFrame(*reopenedView).rgba==reshaped.rgba &&
+    view=reopenedView;
+    check(authoredFrame().rgba==reshaped.rgba &&
           control<QComboBox>(reopened,"baseColorImage")->currentData().toString()==id,
           "Reopened Studio lost the material image or rendered different pixels");
-    view=reopenedView;
     QTest::mouseClick(control<QPushButton>(reopened,"locateImageSource"),Qt::LeftButton);
     visitEditor([&]{QTest::mouseClick(control<QPushButton>(reopened,"editNativeImage"),Qt::LeftButton);},false,
         [&](QWidget& dialog,RasterCanvas& canvas){
             brush(dialog,"#5A99F0FF","imageFill");
             QTest::mouseClick(&canvas,Qt::LeftButton,{},QPoint(4,4));
         });
-    check(settledFrame(*reopenedView).rgba==reshaped.rgba,"Cancelling a reopened draft changed the authored pixels");
+    check(authoredFrame().rgba==reshaped.rgba,"Cancelling a reopened draft changed the authored pixels");
     check(reopened.close(),"Reopened image authoring project did not close");
     std::cout<<"Studio canvas stroke, fill, sample, erase, preview, PNG reimport, Play and v8 reopen passed\n";
 }

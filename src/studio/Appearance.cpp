@@ -136,6 +136,7 @@ QListWidget::item:selected { background: $selected; color: $text; }
 QListWidget::item:focus { border: 1px solid $focus; }
 QFrame#hubCard, QFrame#recentCard { border: 1px solid $edge; border-radius: 8px; background: $panel; }
 QLabel[role="minor"] { color: $secondary; }
+QLabel[role="panelHeading"] { color: $text; font-size: $brandpt; font-weight: 650; }
 QLabel[role="section"] { font-size: $sectionpt; font-weight: 700; color: $secondary; }
 QLabel[role="hubTitle"] { font-size: $titlept; font-weight: 650; }
 QLabel#brand { color: $focus; font-size: $brandpt; font-weight: 750; }

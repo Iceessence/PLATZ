@@ -305,9 +305,17 @@ auto materialTexture(const DrawObject& object,unsigned slot) -> std::optional<st
         return {{TextureKey{object.asset->digest(),*texture},{object.asset.get(),nullptr}}};
     return {};
 }
-struct TextureBinding {
+struct TextureResource {
+    VkDevice device{};
     Image image;
     VkSampler sampler{};
+    bool mipmapped{};
+    ~TextureResource() {
+        if (sampler) vkDestroySampler(device,sampler,nullptr);
+    }
+};
+struct TextureBinding {
+    std::shared_ptr<TextureResource> resource;
     VkDescriptorSet set{};
 };
 struct TextureBatch {
@@ -315,12 +323,9 @@ struct TextureBatch {
     VkDescriptorPool pool{};
     TextureBinding white;
     std::map<TextureKey,TextureBinding> entries;
-    unsigned warnings{}, mipmapped{};
+    unsigned warnings{}, mipmapped{}, uploaded{};
     ~TextureBatch() {
         if (pool) vkDestroyDescriptorPool(device,pool,nullptr);
-        if (white.sampler) vkDestroySampler(device,white.sampler,nullptr);
-        for (auto& [key,binding]:entries)
-            if (binding.sampler) vkDestroySampler(device,binding.sampler,nullptr);
     }
 };
 } // namespace
@@ -546,9 +551,12 @@ void Renderer::Impl::upload(const std::map<std::string,const platz::MeshAsset*>&
     imported=std::move(newRanges);
 }
 void Renderer::Impl::uploadTextures(const TextureSources& sources) {
-    VkDeviceSize bytes=4;
-    for (const auto& item:sources) bytes+=item.first.second.rgbaSize();
-    if (sources.size()>BaseColorTexture::maxActive || bytes-4>BaseColorTexture::maxActiveBytes)
+    VkDeviceSize activeBytes=0, stagingBytes=textures ? 0 : 4;
+    for (const auto& [key,input]:sources) {
+        activeBytes+=key.second.rgbaSize();
+        if (!textures || !textures->entries.contains(key)) stagingBytes+=key.second.rgbaSize();
+    }
+    if (sources.size()>BaseColorTexture::maxActive || activeBytes>BaseColorTexture::maxActiveBytes)
         throw std::runtime_error("Material textures exceed the viewport's texture budget.");
     auto batch=std::make_unique<TextureBatch>();
     batch->device=d.device;
@@ -560,9 +568,13 @@ void Renderer::Impl::uploadTextures(const TextureSources& sources) {
     pool.poolSizeCount=static_cast<uint32_t>(sizes.size());
     pool.pPoolSizes=sizes.data();
     check(vkCreateDescriptorPool(d.device,&pool,nullptr,&batch->pool),"Creating material descriptor pool");
-    auto staging=d.buffer(bytes,VK_BUFFER_USAGE_TRANSFER_SRC_BIT,MemoryIntent::Upload,"Base-color texture upload");
-    auto pixels=std::span(static_cast<std::uint8_t*>(staging.mapped),static_cast<size_t>(bytes));
-    std::fill_n(pixels.begin(),4,std::uint8_t{255});
+    Buffer staging;
+    std::span<std::uint8_t> pixels;
+    if (stagingBytes) {
+        staging=d.buffer(stagingBytes,VK_BUFFER_USAGE_TRANSFER_SRC_BIT,MemoryIntent::Upload,"Base-color texture upload");
+        pixels=std::span(static_cast<std::uint8_t*>(staging.mapped),static_cast<size_t>(stagingBytes));
+        if (!textures) std::fill_n(pixels.begin(),4,std::uint8_t{255});
+    }
     startCommands(d.device,transferPool,transferCmd);
     constexpr auto textureFormat=VK_FORMAT_R8G8B8A8_SRGB;
     VkFormatProperties format{};
@@ -570,24 +582,26 @@ void Renderer::Impl::uploadTextures(const TextureSources& sources) {
     constexpr auto mipFeatures=VK_FORMAT_FEATURE_BLIT_SRC_BIT|VK_FORMAT_FEATURE_BLIT_DST_BIT|
                                VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
     const bool canGenerateMips=(format.optimalTilingFeatures&mipFeatures)==mipFeatures;
-    const auto makeBinding=[&](TextureBinding& target,const BaseColorTexture& asset,VkDeviceSize offset) {
+    const auto upload=[&](const BaseColorTexture& asset,VkDeviceSize offset) {
+        auto target=std::make_shared<TextureResource>();
+        target->device=d.device;
         const VkExtent2D extent{asset.width,asset.height};
         const uint32_t levels=canGenerateMips && asset.mip!=TextureMipFilter::None
             ? std::bit_width(std::max(extent.width,extent.height)) : 1u;
         VkImageUsageFlags usage=VK_IMAGE_USAGE_TRANSFER_DST_BIT|VK_IMAGE_USAGE_SAMPLED_BIT;
         if (levels>1) usage|=VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
-        target.image=d.image(extent,textureFormat,usage,VK_IMAGE_ASPECT_COLOR_BIT,"Base-color image",levels);
-        imageBarrier(transferCmd,target.image.handle,VK_IMAGE_ASPECT_COLOR_BIT,VK_IMAGE_LAYOUT_UNDEFINED,
+        target->image=d.image(extent,textureFormat,usage,VK_IMAGE_ASPECT_COLOR_BIT,"Base-color image",levels);
+        imageBarrier(transferCmd,target->image.handle,VK_IMAGE_ASPECT_COLOR_BIT,VK_IMAGE_LAYOUT_UNDEFINED,
             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,VK_PIPELINE_STAGE_2_NONE,0,
             VK_PIPELINE_STAGE_2_COPY_BIT|VK_PIPELINE_STAGE_2_BLIT_BIT,VK_ACCESS_2_TRANSFER_WRITE_BIT,0,levels);
         VkBufferImageCopy copy{};
         copy.bufferOffset=offset;
         copy.imageSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};
         copy.imageExtent={extent.width,extent.height,1};
-        vkCmdCopyBufferToImage(transferCmd,staging.handle,target.image.handle,
+        vkCmdCopyBufferToImage(transferCmd,staging.handle,target->image.handle,
                                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,1,&copy);
-        generateTextureMips(transferCmd,target.image.handle,extent,levels);
-        if (levels>1) ++batch->mipmapped;
+        generateTextureMips(transferCmd,target->image.handle,extent,levels);
+        target->mipmapped=levels>1;
 
         const auto address=[](TextureWrap mode) {
             if (mode==TextureWrap::Clamp) return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
@@ -606,14 +620,18 @@ void Renderer::Impl::uploadTextures(const TextureSources& sources) {
         sampler.mipmapMode=asset.mip==TextureMipFilter::Linear
             ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST;
         sampler.maxLod=float(levels-1);
-        check(vkCreateSampler(d.device,&sampler,nullptr,&target.sampler),"Creating base-color sampler");
+        check(vkCreateSampler(d.device,&sampler,nullptr,&target->sampler),"Creating base-color sampler");
+        return target;
+    };
+    const auto bind=[&](TextureBinding& target,std::shared_ptr<TextureResource> resource) {
+        target.resource=std::move(resource);
         VkDescriptorSetAllocateInfo alloc{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
         alloc.descriptorPool=batch->pool;
         alloc.descriptorSetCount=1;
         alloc.pSetLayouts=&textureLayout;
         check(vkAllocateDescriptorSets(d.device,&alloc,&target.set),"Allocating material descriptor set");
-        const VkDescriptorImageInfo image{VK_NULL_HANDLE,target.image.view,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-        const VkDescriptorImageInfo samplerInfo{target.sampler,VK_NULL_HANDLE,VK_IMAGE_LAYOUT_UNDEFINED};
+        const VkDescriptorImageInfo image{VK_NULL_HANDLE,target.resource->image.view,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+        const VkDescriptorImageInfo samplerInfo{target.resource->sampler,VK_NULL_HANDLE,VK_IMAGE_LAYOUT_UNDEFINED};
         VkWriteDescriptorSet writes[2]{};
         for (auto& write:writes) {
             write.sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -630,10 +648,23 @@ void Renderer::Impl::uploadTextures(const TextureSources& sources) {
     };
     BaseColorTexture white;
     white.width=white.height=1;
-    makeBinding(batch->white,white,0);
-    size_t offset=4;
+    bind(batch->white,textures ? textures->white.resource : upload(white,0));
+    size_t offset=textures ? 0 : 4;
     for (const auto& [key,source]:sources) {
         auto& target=batch->entries[key];
+        if (textures) {
+            const auto previous=textures->entries.find(key);
+            if (previous!=textures->entries.end()) {
+                if (previous->second.resource) {
+                    bind(target,previous->second.resource);
+                    if (target.resource->mipmapped) ++batch->mipmapped;
+                } else {
+                    ++batch->warnings;
+                    target.set=batch->white.set;
+                }
+                continue;
+            }
+        }
         const auto& asset=key.second;
         const auto start=offset;
         offset+=asset.rgbaSize();
@@ -641,15 +672,17 @@ void Renderer::Impl::uploadTextures(const TextureSources& sources) {
             if (source.raster)
                 std::ranges::copy(source.raster->pixels(),pixels.begin()+start);
             else source.embedded->readTexturePixels(asset,pixels.subspan(start,asset.rgbaSize()));
-        }
-        catch (const std::runtime_error&) {
+        } catch (const std::runtime_error&) {
             ++batch->warnings;
             target.set=batch->white.set;
             continue;
         }
-        makeBinding(target,asset,start);
+        bind(target,upload(asset,start));
+        ++batch->uploaded;
+        if (target.resource->mipmapped) ++batch->mipmapped;
     }
-    check(vmaFlushAllocation(d.allocator,staging.allocation,0,VK_WHOLE_SIZE),"Flushing texture upload");
+    if (staging.handle)
+        check(vmaFlushAllocation(d.allocator,staging.allocation,0,VK_WHOLE_SIZE),"Flushing texture upload");
     pendingTextures=std::move(batch);
     textureStaging=std::move(staging);
     finishTransfer();
@@ -1304,6 +1337,7 @@ std::string Renderer::diagnostics() const {
       << " ms, last completed GPU frame " << impl_->gpuMs << " ms, pipeline creation " << impl_->pipelineMs
       << " ms | base-color texture bindings " << (impl_->textures ? impl_->textures->entries.size() : 0)
       << ", GPU mip chains " << (impl_->textures ? impl_->textures->mipmapped : 0)
+      << ", latest batch image uploads " << (impl_->textures ? impl_->textures->uploaded : 0)
       << ", decode fallbacks " << textureWarnings();
     return s.str();
 }

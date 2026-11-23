@@ -15,12 +15,21 @@
 #include <QShortcut>
 #include <QSignalBlocker>
 #include <QSpinBox>
+#include <QSplitter>
+#include <QDockWidget>
 #include <QTimer>
 #include <QToolButton>
 #include <QVBoxLayout>
 #include <algorithm>
+#include <utility>
 
 namespace {
+struct ImageDraft {
+    QColor brush{"#58CCAC"};
+    platz::Raster raster;
+    bool scenePreview{};
+};
+
 QString rgbaHex(QColor color) {
     return (color.name()+QString("%1").arg(color.alpha(),2,16,QChar('0'))).toUpper();
 }
@@ -32,7 +41,8 @@ QColor rgbaColor(const QString& hex) {
 }
 
 void StudioWindow::editImage(const std::string& id) {
-    if (!project_ || runtime_ || (!id.empty() && !project_->imageLibrary().contains(id))) return;
+    if (!project_ || runtime_ || imageEditor_ || (!id.empty() && !project_->imageLibrary().contains(id))) return;
+    viewport_->cancelDrag();
     finishActiveField();
     const auto revision=project_->revision();
     const auto projectId=project_->id();
@@ -44,11 +54,17 @@ void StudioWindow::editImage(const std::string& id) {
     QImage initial(32,32,QImage::Format_RGBA8888);
     initial.fill(Qt::transparent);
     if (!creating) initial=canvasImage(project_->imageLibrary().at(id).raster);
-    QDialog dialog(this);
-    dialog.setObjectName("imageEditor");
-    dialog.setWindowTitle(creating ? tr("Create Image / Texture") :
-                                    tr("Edit %1").arg(QString::fromStdString(project_->imageLibrary().at(id).name)));
-    auto* panel=new QVBoxLayout(&dialog);
+    auto* editor=new QWidget;
+    editor->setObjectName("imageEditor");
+    editor->setAccessibleName(tr("Image editor"));
+    auto* panel=new QVBoxLayout(editor);
+    panel->setContentsMargins(12,12,12,12);
+    auto* heading=new QLabel(creating ? tr("New image") :
+                                  tr("Paint %1").arg(QString::fromStdString(project_->imageLibrary().at(id).name)));
+    heading->setProperty("role","panelHeading");
+    heading->setWordWrap(true);
+    panel->addWidget(heading);
+    const auto state=std::make_shared<ImageDraft>();
     auto* name=new QLineEdit(creating ? tr("Untitled image") : QString::fromStdString(project_->imageLibrary().at(id).name));
     name->setObjectName("imageName");
     name->setAccessibleName(tr("Image name"));
@@ -61,17 +77,17 @@ void StudioWindow::editImage(const std::string& id) {
         auto* row=new QHBoxLayout;
         row->addWidget(new QLabel(tr("Name")));
         row->addWidget(name,1);
-        row->addWidget(bind);
         panel->addLayout(row);
+        panel->addWidget(bind);
     } else {
-        name->setParent(&dialog);
+        name->setParent(editor);
         name->hide();
-        bind->setParent(&dialog);
+        bind->setParent(editor);
         bind->hide();
     }
     auto* canvas=new RasterCanvas(std::move(initial));
     auto* tools=new QHBoxLayout;
-    auto* group=new QButtonGroup(&dialog);
+    auto* group=new QButtonGroup(editor);
     const std::array labels{tr("Pencil"),tr("Eraser"),tr("Fill"),tr("Eyedropper")};
     const std::array names{"imagePencil","imageEraser","imageFill","imageEyedropper"};
     for (int index=0;index<int(labels.size());++index) {
@@ -83,7 +99,7 @@ void StudioWindow::editImage(const std::string& id) {
         group->addButton(button,index);
         tools->addWidget(button);
     }
-    connect(group,&QButtonGroup::idClicked,&dialog,[canvas](int index){
+    connect(group,&QButtonGroup::idClicked,editor,[canvas](int index){
         canvas->setTool(static_cast<RasterCanvas::Tool>(index));
     });
     tools->addStretch(1);
@@ -97,12 +113,14 @@ void StudioWindow::editImage(const std::string& id) {
     redo->setEnabled(false);
     tools->addWidget(undo);
     tools->addWidget(redo);
-    connect(undo,&QToolButton::clicked,&dialog,[canvas]{canvas->undo();});
-    connect(redo,&QToolButton::clicked,&dialog,[canvas]{canvas->redo();});
-    auto* undoKey=new QShortcut(QKeySequence::Undo,&dialog);
-    auto* redoKey=new QShortcut(QKeySequence(Qt::CTRL|Qt::Key_Y),&dialog);
+    connect(undo,&QToolButton::clicked,editor,[canvas]{canvas->undo();});
+    connect(redo,&QToolButton::clicked,editor,[canvas]{canvas->redo();});
+    auto* undoKey=new QShortcut(QKeySequence::Undo,editor);
+    auto* redoKey=new QShortcut(QKeySequence(Qt::CTRL|Qt::Key_Y),editor);
     connect(undoKey,&QShortcut::activated,undo,&QToolButton::click);
     connect(redoKey,&QShortcut::activated,redo,&QToolButton::click);
+    undoKey->setContext(Qt::WidgetWithChildrenShortcut);
+    redoKey->setContext(Qt::WidgetWithChildrenShortcut);
     panel->addLayout(tools);
 
     auto* colorRow=new QHBoxLayout;
@@ -123,26 +141,25 @@ void StudioWindow::editImage(const std::string& id) {
     const int startZoom=canvas->image().width()>128 || canvas->image().height()>128 ? 1 : 3;
     zoom->setCurrentIndex(startZoom);
     canvas->setZoom(zoom->currentData().toInt());
-    connect(zoom,&QComboBox::currentIndexChanged,&dialog,[canvas,zoom]{canvas->setZoom(zoom->currentData().toInt());});
+    connect(zoom,&QComboBox::currentIndexChanged,editor,[canvas,zoom]{canvas->setZoom(zoom->currentData().toInt());});
     auto* grid=new QCheckBox(tr("Grid"));
     grid->setChecked(true);
-    connect(grid,&QCheckBox::toggled,&dialog,[canvas](bool value){canvas->setGrid(value);});
+    connect(grid,&QCheckBox::toggled,editor,[canvas](bool value){canvas->setGrid(value);});
     colorRow->addWidget(zoom);
     colorRow->addWidget(grid);
     panel->addLayout(colorRow);
-    QColor brush("#58CCAC");
-    auto setBrush=[&](QColor value){
-        brush=value;
+    auto setBrush=[state,canvas,color](QColor value){
+        state->brush=value;
         canvas->setColor(value);
         const QSignalBlocker block(color);
         color->setText(rgbaHex(value));
     };
-    connect(color,&QLineEdit::editingFinished,&dialog,[&]{
+    connect(color,&QLineEdit::editingFinished,editor,[state,color,setBrush]{
         const auto value=rgbaColor(color->text());
-        setBrush(value.isValid() ? value : brush);
+        setBrush(value.isValid() ? value : state->brush);
     });
-    connect(swatch,&QPushButton::clicked,&dialog,[&]{
-        const auto chosen=QColorDialog::getColor(brush,&dialog,tr("Brush RGBA"),
+    connect(swatch,&QPushButton::clicked,editor,[state,editor,setBrush]{
+        const auto chosen=QColorDialog::getColor(state->brush,editor,tr("Brush RGBA"),
             QColorDialog::ShowAlphaChannel|QColorDialog::DontUseNativeDialog);
         if (chosen.isValid()) setBrush(chosen);
     });
@@ -151,7 +168,8 @@ void StudioWindow::editImage(const std::string& id) {
     auto* scroll=new QScrollArea;
     scroll->setAlignment(Qt::AlignCenter);
     scroll->setWidget(canvas);
-    scroll->setMinimumSize(420,300);
+    canvas->revealPixel=[scroll](QPoint pixel){scroll->ensureVisible(pixel.x(),pixel.y(),12,12);};
+    scroll->setMinimumSize(205,180);
     panel->addWidget(scroll,1);
     auto* dimensions=new QHBoxLayout;
     auto* width=new QSpinBox;
@@ -174,13 +192,13 @@ void StudioWindow::editImage(const std::string& id) {
     auto* exportDraft=new QPushButton(tr("Export PNG…"));
     exportDraft->setObjectName("exportDraftPng");
     dimensions->addWidget(exportDraft);
-    connect(exportDraft,&QPushButton::clicked,&dialog,[&]{
+    connect(exportDraft,&QPushButton::clicked,editor,[this,canvas]{
         protectedCall([&]{exportPng(rasterSource(canvas->image()));});
     });
     panel->addLayout(dimensions);
-    auto resizeImage=[&]{canvas->resizeImage({width->value(),height->value()});};
-    connect(width,&QSpinBox::valueChanged,&dialog,resizeImage);
-    connect(height,&QSpinBox::valueChanged,&dialog,resizeImage);
+    auto resizeImage=[canvas,width,height]{canvas->resizeImage({width->value(),height->value()});};
+    connect(width,&QSpinBox::valueChanged,editor,resizeImage);
+    connect(height,&QSpinBox::valueChanged,editor,resizeImage);
     auto* status=new QLabel;
     status->setObjectName("imagePreviewStatus");
     status->setWordWrap(true);
@@ -192,58 +210,54 @@ void StudioWindow::editImage(const std::string& id) {
     apply->setEnabled(false);
     apply->setAutoDefault(false);
     panel->addWidget(buttons);
-    connect(buttons,&QDialogButtonBox::accepted,&dialog,&QDialog::accept);
-    connect(buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject);
+    auto* discard=buttons->button(QDialogButtonBox::Cancel);
+    discard->setObjectName("discardImageDraft");
+    discard->setText(tr("Discard draft"));
+    connect(discard,&QPushButton::clicked,this,&StudioWindow::closeImageEditor);
 
-    auto current=[&]{return project_ && !runtime_ && project_->id()==projectId && project_->revision()==revision;};
-    auto assignment=[&]{return bind->isChecked() ? target : std::nullopt;};
-    platz::Raster draft;
-    bool scenePreview=false;
-    auto verifyName=[&]{
-        apply->setEnabled(draft && (!creating || (!name->text().trimmed().isEmpty() && name->text().toUtf8().size()<=240)));
+    const auto current=[this,editor,projectId,revision]{
+        return imageEditor_==editor && project_ && !runtime_ && project_->id()==projectId && project_->revision()==revision;
     };
-    auto restoreScene=[&]{
-        if (scenePreview && project_) viewport_->setScene(project_->objects(),selected_);
-        scenePreview=false;
+    const auto assignment=[bind,target]{return bind->isChecked() ? target : std::nullopt;};
+    const auto verifyName=[state,apply,creating,name]{
+        apply->setEnabled(state->raster && (!creating || (!name->text().trimmed().isEmpty() && name->text().toUtf8().size()<=240)));
     };
-    auto preview=[&]{
+    const auto preview=[this,canvas,state,status,id,revision,linked,current,assignment,verifyName]{
+        if (!current()) return;
         try {
-            if (!current()) throw std::runtime_error("Project changed. Close this editor and try again.");
             auto raster=rasterSource(canvas->image());
             const auto binding=assignment();
             auto objects=project_->previewImage(id,raster,binding,revision);
             if (linked || binding) {
                 viewport_->setScene(objects,selected_);
-                scenePreview=true;
-                if (!viewport_->presentScene()) {
-                    restoreScene();
-                    viewport_->retryRenderer();
-                    throw std::runtime_error("The GPU preview failed. The authored scene was restored.");
-                }
-                status->setText(tr("Viewport preview · Alpha is kept in source and PNG. The 3D material is opaque."));
+                state->scenePreview=true;
+                status->setText(tr("Live base-color preview · Alpha is retained in the image and its PNG."));
             } else {
-                restoreScene();
-                status->setText(tr("RGBA source · Assign it to a mesh material slot with UV0."));
+                if (state->scenePreview) viewport_->setScene(project_->objects(),selected_);
+                state->scenePreview=false;
+                status->setText(tr("Assign this image to a UV-mapped material slot to see it in the viewport."));
             }
-            draft=std::move(raster);
+            state->raster=std::move(raster);
         } catch (const std::exception& error) {
-            draft.reset();
+            if (state->scenePreview) viewport_->setScene(project_->objects(),selected_);
+            state->scenePreview=false;
+            state->raster.reset();
             status->setText(QString::fromUtf8(error.what()));
         }
         verifyName();
     };
-    QTimer timer;
-    timer.setInterval(55);
-    timer.setTimerType(Qt::PreciseTimer);
-    timer.setSingleShot(true);
-    connect(&timer,&QTimer::timeout,&dialog,preview);
-    auto schedule=[&]{
-        draft.reset();
+    auto* timer=new QTimer(editor);
+    timer->setInterval(16);
+    timer->setTimerType(Qt::PreciseTimer);
+    timer->setSingleShot(true);
+    connect(timer,&QTimer::timeout,editor,preview);
+    const auto schedule=[timer,state,status,verifyName]{
+        state->raster.reset();
         status->setText(tr("Updating preview…"));
         verifyName();
-        if (!timer.isActive()) timer.start();
+        if (!timer->isActive()) timer->start();
     };
-    canvas->changed=[&]{
+    canvas->changed=[width,height,canvas,undo,redo,schedule]{
         const QSignalBlocker blockWidth(width),blockHeight(height);
         width->setValue(canvas->image().width());
         height->setValue(canvas->image().height());
@@ -251,22 +265,43 @@ void StudioWindow::editImage(const std::string& id) {
         redo->setEnabled(canvas->canRedo());
         schedule();
     };
-    connect(bind,&QCheckBox::toggled,&dialog,schedule);
-    connect(name,&QLineEdit::textChanged,&dialog,verifyName);
-    QTimer::singleShot(0,&dialog,preview);
-    dialog.resize(520,540);
-    dialog.move(mapToGlobal(QPoint(std::max(0,this->width()-dialog.width()-12),100)));
-    const bool confirmed=dialog.exec()==QDialog::Accepted && draft && current();
-    timer.stop();
-    restoreScene();
-    canvas->changed={};
-    if (!confirmed) return;
-    protectedCall([&]{
-        auto selected=id;
-        if (creating) selected=project_->createImage(name->text().toStdString(),draft,assignment(),revision);
-        else project_->editImage(id,draft,revision);
-        refresh();
-        showImage(selected);
-        notify(creating ? tr("Created an editable image source.") : tr("Applied image edits to linked slots."));
+    connect(bind,&QCheckBox::toggled,editor,schedule);
+    connect(name,&QLineEdit::textChanged,editor,verifyName);
+    connect(apply,&QPushButton::clicked,editor,[this,id,name,state,creating,revision,current,assignment,status]{
+        if (!current() || !state->raster) return;
+        try {
+            const auto selected=creating ? project_->createImage(name->text().toStdString(),state->raster,assignment(),revision) : id;
+            if (!creating) project_->editImage(id,state->raster,revision);
+            closeImageEditor();
+            showImage(selected);
+            notify(creating ? tr("Created an editable image source.") : tr("Applied image edits to linked slots."));
+        } catch (const std::exception& error) {
+            status->setText(QString::fromUtf8(error.what()));
+        }
     });
+
+    beforePaintLayout_=saveState(1);
+    imageEditor_=editor;
+    workSurface_->insertWidget(0,editor);
+    workSurface_->setSizes({std::max(360,workSurface_->width()/2),std::max(260,workSurface_->width()/2)});
+    refresh();
+    editor->show();
+    if (creating) {
+        name->setFocus();
+        name->selectAll();
+    } else {
+        group->buttons().front()->setFocus();
+    }
+    QTimer::singleShot(0,editor,preview);
+}
+
+void StudioWindow::closeImageEditor() {
+    if (!imageEditor_) return;
+    auto* editor=std::exchange(imageEditor_,nullptr);
+    editor->setObjectName({});
+    editor->hide();
+    editor->deleteLater();
+    refresh();
+    restoreState(std::exchange(beforePaintLayout_,QByteArray{}),1);
+    viewport_->setFocus();
 }

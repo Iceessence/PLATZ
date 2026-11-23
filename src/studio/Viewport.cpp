@@ -79,8 +79,16 @@ platz::Vec3 Viewport::localPivot() const {
     return {std::midpoint(min[0],max[0]),std::midpoint(min[1],max[1]),std::midpoint(min[2],max[2])};
 }
 GizmoPaths Viewport::manipulatorPaths() const {
-    return selection_ && !playing_ && !failed_ ?
+    return manipulatorVisible_ && selection_ && !playing_ && !failed_ ?
         gizmoPaths(camera_,size(),selectedTransform(),transformSettings_,localPivot()) : GizmoPaths{};
+}
+void Viewport::setManipulatorVisible(bool visible) {
+    if (manipulatorVisible_==visible) return;
+    if (!visible) cancelDrag();
+    manipulatorVisible_=visible;
+    displayedGizmo_={};
+    hovered_=-1;
+    update();
 }
 void Viewport::setTransformSettings(TransformSettings settings) {
     cancelDrag();
@@ -327,7 +335,7 @@ void Viewport::keyPressEvent(QKeyEvent* event) {
         event->accept();
         return;
     }
-    if (!playing_ && onTool && event->modifiers()==Qt::NoModifier &&
+    if (!playing_ && manipulatorVisible_ && onTool && event->modifiers()==Qt::NoModifier &&
         event->key()>=Qt::Key_1 && event->key()<=Qt::Key_4) {
         onTool(static_cast<TransformTool>(event->key()-Qt::Key_1));
         return;

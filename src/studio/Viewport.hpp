@@ -20,6 +20,7 @@ public:
     void setScene(const std::vector<platz::Object>& objects, const std::string& selection);
     void previewObject(const platz::Object& object, bool redraw = true);
     void setTransformSettings(platz::studio::TransformSettings settings);
+    void setManipulatorVisible(bool visible);
     void cancelDrag();
     bool dragging() const { return drag_.has_value(); }
     float dragAngle() const { return drag_ ? drag_->degrees() : 0.f; }
@@ -53,6 +54,7 @@ private:
     platz::engine::Camera camera_, authoringCamera_;
     std::vector<platz::engine::DrawObject> draws_;
     bool idsChanged_{true};
+    bool manipulatorVisible_{true};
     std::vector<std::string> ids_, displayedIds_;
     std::vector<std::string> pickIds_;
     std::optional<QPoint> queuedPick_;

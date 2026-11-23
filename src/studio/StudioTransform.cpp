@@ -97,7 +97,7 @@ void StudioWindow::configureManipulator() {
 }
 
 bool StudioWindow::beginPreview(const std::string& id) {
-    if (refreshing_ || !project_ || runtime_ || preview_ || id!=selected_) return false;
+    if (refreshing_ || !project_ || runtime_ || imageEditor_ || preview_ || id!=selected_) return false;
     if (const auto* object=project_->find(id)) {
         protectedCall([&]{preview_=project_->stage(*object,project_->revision());});
         if (preview_) {

@@ -11,6 +11,7 @@
 #include <QDockWidget>
 #include <QDoubleSpinBox>
 #include <QFileDialog>
+#include <QFile>
 #include <QFileInfo>
 #include <QLabel>
 #include <QLineEdit>
@@ -23,12 +24,14 @@
 #include <QSignalBlocker>
 #include <QShortcut>
 #include <QStackedWidget>
+#include <QSplitter>
 #include <QStatusBar>
 #include <QTimer>
 #include <QToolBar>
 #include <QToolButton>
 #include <algorithm>
 #include <cmath>
+#include <utility>
 
 StudioWindow::StudioWindow() {
     pages_ = new QStackedWidget;
@@ -55,6 +58,7 @@ void StudioWindow::buildMenus() {
     auto* file = menuBar()->addMenu(tr("&Project"));
     file->addAction(tr("&New project…"),QKeySequence::New,this,&StudioWindow::newProject);
     file->addAction(tr("&Open project…"),QKeySequence::Open,this,&StudioWindow::chooseProject);
+    file->addAction(tr("Open validation workspace"),this,&StudioWindow::openValidationProject);
     saveAction_ = file->addAction(tr("&Save"),QKeySequence::Save,this,[this]{saveChanges();});
     restore_ = file->addAction(tr("Restore previous saved revision"),this,[this]{
         if (project_ && !runtime_) protectedCall([&]{
@@ -145,7 +149,11 @@ void StudioWindow::buildMenus() {
     playAction_->setObjectName("playStudio");
     saveAction_->setObjectName("saveStudio");
     auto* stop = new QShortcut(QKeySequence(Qt::Key_Escape),this);
-    connect(stop,&QShortcut::activated,this,[this]{if(runtime_) togglePlay(); else cancelPreview();});
+    connect(stop,&QShortcut::activated,this,[this]{
+        if (imageEditor_) closeImageEditor();
+        else if (runtime_) togglePlay();
+        else cancelPreview();
+    });
     auto* help = menuBar()->addMenu(tr("&Help"));
     help->addAction(tr("About PLATZ Studio"),this,[this]{
         QMessageBox about(QMessageBox::Information,tr("About PLATZ Studio"),
@@ -185,6 +193,10 @@ void StudioWindow::finishActiveField() {
 }
 bool StudioWindow::saveChanges() {
     if (!project_ || runtime_) return false;
+    if (imageEditor_) {
+        notify(tr("Apply or discard the image draft before saving the project."));
+        return false;
+    }
     viewport_->cancelDrag();
     finishActiveField();
     try {
@@ -198,6 +210,12 @@ bool StudioWindow::saveChanges() {
     }
 }
 bool StudioWindow::confirmLeave() {
+    if (imageEditor_) {
+        const auto response=QMessageBox::question(this,tr("Image draft"),tr("Discard the open image draft?"),
+            QMessageBox::Discard|QMessageBox::Cancel,QMessageBox::Cancel);
+        if (response!=QMessageBox::Discard) return false;
+        closeImageEditor();
+    }
     viewport_->cancelDrag();
     finishActiveField();
     if (runtime_) togglePlay();
@@ -253,7 +271,48 @@ void StudioWindow::attach(platz::Project project) {
     refresh();
     notify(tr("Opened revision %1").arg(project_->savedRevision()));
 }
+namespace {
+QString validationSourcePath() {
+    return QDir::cleanPath(QCoreApplication::applicationDirPath()+"/../../projects/PLATZ Validation.platz");
+}
+}
+
+QString StudioWindow::validationWorkingPath() const {
+    return QDir::cleanPath(QCoreApplication::applicationDirPath()+"/../../.local/validation/PLATZ Validation.platz");
+}
+
+void StudioWindow::openValidationProject() {
+    const auto working=validationWorkingPath();
+    const auto canonical=QFileInfo(working).canonicalFilePath();
+    if (!canonical.isEmpty() && project_ &&
+        QFileInfo(QString::fromStdWString(project_->path().wstring())).canonicalFilePath()==canonical) {
+        notify(tr("The validation workspace is already open."));
+        return;
+    }
+    if (!QFileInfo::exists(working)) {
+        if (!QDir().mkpath(QFileInfo(working).absolutePath()) ||
+            (!QFile::copy(validationSourcePath(),working) && !QFileInfo(working).isFile())) {
+            notify(tr("Could not prepare the validation workspace. Check the PLATZ checkout and build directory."));
+            return;
+        }
+    }
+    std::error_code error;
+    const auto editable=std::filesystem::path(working.toStdWString());
+    const auto original=std::filesystem::path(validationSourcePath().toStdWString());
+    if (std::filesystem::equivalent(editable,original,error) || error) {
+        notify(tr("The validation workspace must be a separate file from its reference project."));
+        return;
+    }
+    openProject(working);
+}
+
 bool StudioWindow::openProject(const QString& path) {
+    const auto source=QFileInfo(validationSourcePath()).canonicalFilePath();
+    if (!source.isEmpty() && QFileInfo(path).canonicalFilePath()==source) {
+        openValidationProject();
+        return project_ && QFileInfo(QString::fromStdWString(project_->path().wstring())).canonicalFilePath()==
+                           QFileInfo(validationWorkingPath()).canonicalFilePath();
+    }
     if(path.isEmpty() || !confirmLeave()) return false;
     try {
         attach(platz::Project::open(std::filesystem::path(path.toStdWString())));
@@ -302,27 +361,47 @@ void StudioWindow::refresh(const std::string& preferredAsset) {
     projectTitle_->setToolTip(title);
     auto suffix = project_->dirty() ? tr("  ·  Unsaved") : QString{};
     setWindowTitle(title+suffix+tr(" · PLATZ Studio"));
-    mode_->setText(runtime_ ? tr("Play  ·  runtime copy") : tr("Authoring  ·  Project rev. %1%2").arg(project_->revision()).arg(suffix));
+    mode_->setText(runtime_ ? tr("Play  ·  runtime copy") :
+                   imageEditor_ ? tr("Texture preview  ·  Project rev. %1").arg(project_->revision()) :
+                                  tr("Authoring  ·  Project rev. %1%2").arg(project_->revision()).arg(suffix));
     play_->setText(runtime_ ? tr("■  Stop") : tr("▶  Play"));
     playAction_->setText(runtime_ ? tr("Stop") : tr("Play"));
     syncControlHelp();
+    const bool authoring=!runtime_ && !imageEditor_;
     frameAction_->setEnabled(true);
-    playAction_->setEnabled(true);
-    transformControls_->setVisible(!runtime_);
-    transformControls_->setEnabled(!runtime_);
-    createMenu_->setEnabled(!runtime_);
-    for (auto* action:nativeCreationActions_) action->setEnabled(!runtime_);
-    createImageAction_->setEnabled(!runtime_);
+    play_->setEnabled(!imageEditor_);
+    playAction_->setEnabled(!imageEditor_);
+    syncWorkspaceTools();
+    sceneDock_->setEnabled(!imageEditor_);
+    assetsDock_->setEnabled(!imageEditor_);
+    inspectorDock_->setEnabled(!imageEditor_);
+    if (imageEditor_) {
+        sceneDock_->hide();
+        inspectorDock_->hide();
+    }
+    workspacePicker_->setEnabled(!imageEditor_);
+    workspaceMenu_->setEnabled(!imageEditor_);
+    createMenu_->setEnabled(authoring);
+    for (auto* action:nativeCreationActions_) action->setEnabled(authoring);
+    createImageAction_->setEnabled(authoring);
     homeAction_->setEnabled(true);
-    add_->setEnabled(!runtime_);
-    undo_->setEnabled(!runtime_ && project_->canUndo());
-    redo_->setEnabled(!runtime_ && project_->canRedo());
-    saveAction_->setEnabled(!runtime_);
-    restore_->setEnabled(!runtime_ && project_->canRestorePrevious());
+    add_->setEnabled(authoring);
+    undo_->setEnabled(authoring && project_->canUndo());
+    redo_->setEnabled(authoring && project_->canRedo());
+    saveAction_->setEnabled(authoring);
+    restore_->setEnabled(authoring && project_->canRestorePrevious());
     syncInspector();
     syncSaveState();
     refreshAssets(preferredAsset);
     viewport_->setScene(objects,selected_);
+}
+void StudioWindow::syncWorkspaceTools() {
+    const bool painting=imageEditor_!=nullptr;
+    const bool texture=activeWorkspace_=="texture";
+    transformControls_->setVisible(!runtime_ && !painting && !texture && activeWorkspace_!="playtest");
+    transformControls_->setEnabled(!runtime_ && !painting && !texture && activeWorkspace_!="playtest");
+    textureTools_->setVisible(project_ && texture && !painting && !runtime_);
+    viewport_->setManipulatorVisible(!transformControls_->isHidden());
 }
 void StudioWindow::refreshSceneTree() {
     if (!project_) return;
@@ -346,7 +425,7 @@ void StudioWindow::syncInspector() {
         const auto it=std::find_if(objects.begin(),objects.end(),[&](const auto& o){return o.id==selected_;});
         if(it!=objects.end()) object=&*it;
     }
-    const bool editable=object && !runtime_;
+    const bool editable=object && !runtime_ && !imageEditor_;
     const bool embedded=object && object->asset.data;
     const bool native=embedded && !object->asset.nativeId.empty();
     saveGlb_->setVisible(embedded && !runtime_);
@@ -394,7 +473,7 @@ void StudioWindow::syncTransform(const platz::Object& object,bool changedOnly) {
 }
 void StudioWindow::syncSaveState() {
     bool savable=false;
-    if (project_ && !runtime_) {
+    if (project_ && !runtime_ && !imageEditor_) {
         savable=project_->dirty() || (preview_ && previewEditor_ && previewInputValid_ && preview_->before!=preview_->after);
         if (!savable && name_->isModified()) {
             if (const auto* object=project_->find(selected_)) {
@@ -486,7 +565,7 @@ void StudioWindow::syncMaterial(const platz::Object* object) {
     swatch_->setStyleSheet(QString("background-color: %1").arg(hex));
 }
 void StudioWindow::applyEdit(const std::function<void(platz::Object&)>& change) {
-    if (refreshing_ || runtime_ || !project_) return;
+    if (refreshing_ || runtime_ || !project_ || imageEditor_) return;
     if (auto original=project_->find(selected_)) protectedCall([&]{
         auto edited=*original;
         change(edited);
@@ -496,7 +575,7 @@ void StudioWindow::applyEdit(const std::function<void(platz::Object&)>& change) 
     });
 }
 void StudioWindow::select(std::string id,bool fromViewport) {
-    if (!project_ || refreshing_) return;
+    if (!project_ || refreshing_ || imageEditor_) return;
     // A viewport event can refer to the image immediately preceding a scene update.
     if (!id.empty() && !project_->find(id)) return;
     if (preview_) cancelPreview();
@@ -516,7 +595,7 @@ void StudioWindow::select(std::string id,bool fromViewport) {
     viewport_->setScene(runtime_ ? runtime_->objects() : project_->objects(),selected_);
 }
 void StudioWindow::togglePlay() {
-    if (!project_) return;
+    if (!project_ || imageEditor_) return;
     viewport_->cancelDrag();
     finishActiveField();
     if (runtime_) {

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.28)
-project(PLATZ VERSION 0.2.0 LANGUAGES CXX)
+project(PLATZ VERSION 0.3.0 LANGUAGES CXX)
 configure_file(src/studio/StudioBuild.h.in generated/StudioBuild.h @ONLY)
 if(NOT WIN32 OR NOT MSVC)
     message(FATAL_ERROR "The qualified development target is Windows x64 with MSVC.")

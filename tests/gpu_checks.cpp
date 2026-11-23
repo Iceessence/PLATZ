@@ -324,6 +324,8 @@ void run() {
         0,240,0,0, 0,240,0,0, 0,240,0,0, 0,240,0,0});
     gpu.draw(std::span(&mesh,1),meshCamera);
     check(gpu.capture().rgba==projectImage.rgba,"Opaque material unexpectedly blended native alpha.");
+    check(gpu.diagnostics().find("latest batch image uploads 1,")!=std::string::npos,
+          "A single changed texture caused unrelated images to upload again");
     mesh.images.clear();
     gpu.draw(std::span(&mesh,1),meshCamera);
     check(gpu.capture().rgba==textured.rgba,"Detaching a native image failed to restore the embedded texture.");
