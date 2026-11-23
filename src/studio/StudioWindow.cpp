@@ -1,6 +1,7 @@
 #include "StudioWindow.hpp"
 #include "OrganizerTree.hpp"
 #include "Appearance.hpp"
+#include "StudioBuild.h"
 #include "Viewport.hpp"
 #include <QAction>
 #include <QApplication>
@@ -146,6 +147,14 @@ void StudioWindow::buildMenus() {
     auto* stop = new QShortcut(QKeySequence(Qt::Key_Escape),this);
     connect(stop,&QShortcut::activated,this,[this]{if(runtime_) togglePlay(); else cancelPreview();});
     auto* help = menuBar()->addMenu(tr("&Help"));
+    help->addAction(tr("About PLATZ Studio"),this,[this]{
+        QMessageBox about(QMessageBox::Information,tr("About PLATZ Studio"),
+            tr("PLATZ Studio %1").arg(QStringLiteral(PLATZ_VERSION)),QMessageBox::Ok,this);
+        about.setIconPixmap(platzIcon().pixmap(48,48));
+        about.setInformativeText(tr("Vulkan 1.4 renderer\n\n%1").arg(QDir::toNativeSeparators(QCoreApplication::applicationFilePath())));
+        about.setTextInteractionFlags(Qt::TextSelectableByMouse|Qt::TextSelectableByKeyboard);
+        about.exec();
+    });
     help->addAction(tr("Studio controls"),this,[this]{
         QMessageBox::information(this,tr("Studio controls"),
             tr("Select an object in the scene list or click its surface. In the viewport, use 1 Select, 2 Move, 3 Rotate or 4 Scale. Drag a handle and release to apply. Escape cancels.\n\n"
@@ -293,7 +302,7 @@ void StudioWindow::refresh(const std::string& preferredAsset) {
     projectTitle_->setToolTip(title);
     auto suffix = project_->dirty() ? tr("  ·  Unsaved") : QString{};
     setWindowTitle(title+suffix+tr(" · PLATZ Studio"));
-    mode_->setText(runtime_ ? tr("Play  ·  runtime copy") : tr("Authoring  ·  revision %1%2").arg(project_->revision()).arg(suffix));
+    mode_->setText(runtime_ ? tr("Play  ·  runtime copy") : tr("Authoring  ·  Project rev. %1%2").arg(project_->revision()).arg(suffix));
     play_->setText(runtime_ ? tr("■  Stop") : tr("▶  Play"));
     playAction_->setText(runtime_ ? tr("Stop") : tr("Play"));
     syncControlHelp();
@@ -326,7 +335,7 @@ void StudioWindow::refreshSceneTree() {
         item->setToolTip(0,QString::fromUtf8(platz::meshName(object.mesh)));
     }
     tree_->endRefresh(QString::fromStdString(selected_),false);
-    count_->setText(tr("%n scene object(s)",nullptr,static_cast<int>(objects.size())));
+    count_->setText(objects.size()==1 ? tr("1 object") : tr("%1 objects").arg(objects.size()));
 }
 
 void StudioWindow::syncInspector() {

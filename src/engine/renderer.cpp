@@ -3,6 +3,7 @@
 #include "scene_spv.hpp"
 #include <DirectXMath.h>
 #include <algorithm>
+#include <bit>
 #include <utility>
 #include <chrono>
 #include <cmath>
@@ -211,7 +212,8 @@ constexpr uint64_t timeout = 10'000'000'000ull;
 
 void imageBarrier(VkCommandBuffer cmd, VkImage image, VkImageAspectFlags aspect, VkImageLayout oldLayout,
                   VkImageLayout newLayout, VkPipelineStageFlags2 source, VkAccessFlags2 reads,
-                  VkPipelineStageFlags2 destination, VkAccessFlags2 writes) {
+                  VkPipelineStageFlags2 destination, VkAccessFlags2 writes,
+                  uint32_t firstMip=0,uint32_t mipCount=1) {
     VkImageMemoryBarrier2 b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
     b.srcStageMask = source;
     b.srcAccessMask = reads;
@@ -221,12 +223,39 @@ void imageBarrier(VkCommandBuffer cmd, VkImage image, VkImageAspectFlags aspect,
     b.newLayout = newLayout;
     b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     b.image = image;
-    b.subresourceRange = {aspect, 0, 1, 0, 1};
+    b.subresourceRange = {aspect, firstMip, mipCount, 0, 1};
     VkDependencyInfo d{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
     d.imageMemoryBarrierCount = 1;
     d.pImageMemoryBarriers = &b;
     vkCmdPipelineBarrier2(cmd, &d);
 }
+// Derive each smaller sRGB level on the graphics queue before publishing the texture.
+void generateTextureMips(VkCommandBuffer cmd,VkImage image,VkExtent2D extent,uint32_t levels) {
+    constexpr auto aspect=VK_IMAGE_ASPECT_COLOR_BIT;
+    constexpr auto source=VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    constexpr auto destination=VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    for (uint32_t next=1;next<levels;++next) {
+        imageBarrier(cmd,image,aspect,destination,source,
+            next==1 ? VK_PIPELINE_STAGE_2_COPY_BIT : VK_PIPELINE_STAGE_2_BLIT_BIT,VK_ACCESS_2_TRANSFER_WRITE_BIT,
+            VK_PIPELINE_STAGE_2_BLIT_BIT,VK_ACCESS_2_TRANSFER_READ_BIT,next-1);
+        const VkExtent2D half{std::max(1u,extent.width/2),std::max(1u,extent.height/2)};
+        VkImageBlit blit{};
+        blit.srcSubresource={aspect,next-1,0,1};
+        blit.dstSubresource={aspect,next,0,1};
+        blit.srcOffsets[1]={int32_t(extent.width),int32_t(extent.height),1};
+        blit.dstOffsets[1]={int32_t(half.width),int32_t(half.height),1};
+        vkCmdBlitImage(cmd,image,source,image,destination,1,&blit,VK_FILTER_LINEAR);
+        extent=half;
+    }
+    if (levels>1)
+        imageBarrier(cmd,image,aspect,source,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT,VK_ACCESS_2_TRANSFER_READ_BIT|VK_ACCESS_2_TRANSFER_WRITE_BIT,
+            VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,0,levels-1);
+    imageBarrier(cmd,image,aspect,destination,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        levels==1 ? VK_PIPELINE_STAGE_2_COPY_BIT : VK_PIPELINE_STAGE_2_BLIT_BIT,VK_ACCESS_2_TRANSFER_WRITE_BIT,
+        VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,levels-1);
+}
+
 void startCommands(VkDevice device, VkCommandPool pool, VkCommandBuffer cmd) {
     check(vkResetCommandPool(device, pool, 0), "Recycling completed frame commands");
     VkCommandBufferBeginInfo start{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
@@ -286,7 +315,7 @@ struct TextureBatch {
     VkDescriptorPool pool{};
     TextureBinding white;
     std::map<TextureKey,TextureBinding> entries;
-    unsigned warnings{};
+    unsigned warnings{}, mipmapped{};
     ~TextureBatch() {
         if (pool) vkDestroyDescriptorPool(device,pool,nullptr);
         if (white.sampler) vkDestroySampler(device,white.sampler,nullptr);
@@ -535,22 +564,30 @@ void Renderer::Impl::uploadTextures(const TextureSources& sources) {
     auto pixels=std::span(static_cast<std::uint8_t*>(staging.mapped),static_cast<size_t>(bytes));
     std::fill_n(pixels.begin(),4,std::uint8_t{255});
     startCommands(d.device,transferPool,transferCmd);
+    constexpr auto textureFormat=VK_FORMAT_R8G8B8A8_SRGB;
+    VkFormatProperties format{};
+    vkGetPhysicalDeviceFormatProperties(d.physical,textureFormat,&format);
+    constexpr auto mipFeatures=VK_FORMAT_FEATURE_BLIT_SRC_BIT|VK_FORMAT_FEATURE_BLIT_DST_BIT|
+                               VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+    const bool canGenerateMips=(format.optimalTilingFeatures&mipFeatures)==mipFeatures;
     const auto makeBinding=[&](TextureBinding& target,const BaseColorTexture& asset,VkDeviceSize offset) {
         const VkExtent2D extent{asset.width,asset.height};
-        target.image=d.image(extent,VK_FORMAT_R8G8B8A8_SRGB,
-            VK_IMAGE_USAGE_TRANSFER_DST_BIT|VK_IMAGE_USAGE_SAMPLED_BIT,VK_IMAGE_ASPECT_COLOR_BIT,"Base-color image");
+        const uint32_t levels=canGenerateMips && asset.mip!=TextureMipFilter::None
+            ? std::bit_width(std::max(extent.width,extent.height)) : 1u;
+        VkImageUsageFlags usage=VK_IMAGE_USAGE_TRANSFER_DST_BIT|VK_IMAGE_USAGE_SAMPLED_BIT;
+        if (levels>1) usage|=VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+        target.image=d.image(extent,textureFormat,usage,VK_IMAGE_ASPECT_COLOR_BIT,"Base-color image",levels);
         imageBarrier(transferCmd,target.image.handle,VK_IMAGE_ASPECT_COLOR_BIT,VK_IMAGE_LAYOUT_UNDEFINED,
             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,VK_PIPELINE_STAGE_2_NONE,0,
-            VK_PIPELINE_STAGE_2_COPY_BIT,VK_ACCESS_2_TRANSFER_WRITE_BIT);
+            VK_PIPELINE_STAGE_2_COPY_BIT|VK_PIPELINE_STAGE_2_BLIT_BIT,VK_ACCESS_2_TRANSFER_WRITE_BIT,0,levels);
         VkBufferImageCopy copy{};
         copy.bufferOffset=offset;
         copy.imageSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};
         copy.imageExtent={extent.width,extent.height,1};
         vkCmdCopyBufferToImage(transferCmd,staging.handle,target.image.handle,
                                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,1,&copy);
-        imageBarrier(transferCmd,target.image.handle,VK_IMAGE_ASPECT_COLOR_BIT,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,VK_PIPELINE_STAGE_2_COPY_BIT,VK_ACCESS_2_TRANSFER_WRITE_BIT,
-            VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+        generateTextureMips(transferCmd,target.image.handle,extent,levels);
+        if (levels>1) ++batch->mipmapped;
 
         const auto address=[](TextureWrap mode) {
             if (mode==TextureWrap::Clamp) return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
@@ -566,8 +603,9 @@ void Renderer::Impl::uploadTextures(const TextureSources& sources) {
         sampler.addressModeU=address(asset.wrapU);
         sampler.addressModeV=address(asset.wrapV);
         sampler.addressModeW=VK_SAMPLER_ADDRESS_MODE_REPEAT;
-        sampler.mipmapMode=VK_SAMPLER_MIPMAP_MODE_NEAREST;
-        sampler.maxLod=VK_LOD_CLAMP_NONE;
+        sampler.mipmapMode=asset.mip==TextureMipFilter::Linear
+            ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST;
+        sampler.maxLod=float(levels-1);
         check(vkCreateSampler(d.device,&sampler,nullptr,&target.sampler),"Creating base-color sampler");
         VkDescriptorSetAllocateInfo alloc{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
         alloc.descriptorPool=batch->pool;
@@ -1265,6 +1303,7 @@ std::string Renderer::diagnostics() const {
       << ", readback capacity " << impl_->readback.size << " | last CPU submit/present " << impl_->cpuMs
       << " ms, last completed GPU frame " << impl_->gpuMs << " ms, pipeline creation " << impl_->pipelineMs
       << " ms | base-color texture bindings " << (impl_->textures ? impl_->textures->entries.size() : 0)
+      << ", GPU mip chains " << (impl_->textures ? impl_->textures->mipmapped : 0)
       << ", decode fallbacks " << textureWarnings();
     return s.str();
 }

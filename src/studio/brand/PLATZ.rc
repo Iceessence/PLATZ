@@ -1,1 +1,28 @@
+#include <windows.h>
+#include "StudioBuild.h"
+
 1 ICON "PLATZ.ico"
+
+1 VERSIONINFO
+FILEVERSION PLATZ_VERSION_RESOURCE
+PRODUCTVERSION PLATZ_VERSION_RESOURCE
+FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
+FILEOS VOS_NT_WINDOWS32
+FILETYPE VFT_APP
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "FileDescription", "PLATZ Studio"
+            VALUE "FileVersion", PLATZ_VERSION_WINDOWS
+            VALUE "OriginalFilename", "PLATZ.exe"
+            VALUE "ProductName", "PLATZ Studio"
+            VALUE "ProductVersion", PLATZ_VERSION
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0409, 1200
+    END
+END

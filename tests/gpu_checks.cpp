@@ -243,6 +243,11 @@ void run() {
     meshCamera.frameObject(mesh,376.f/250.f);
     gpu.draw(std::span(&mesh,1),meshCamera);
     const auto textured=gpu.capture();
+    check(mesh.asset->materialSlots()[0].texture->mip==platz::TextureMipFilter::None &&
+          mesh.asset->materialSlots()[1].texture->mip==platz::TextureMipFilter::Linear,
+          "GLB sampler minification did not preserve nearest or default mip filtering");
+    const bool hasMips=gpu.diagnostics().find("GPU mip chains 1,")!=std::string::npos;
+    std::cout<<"Imported texture mip generation "<<(hasMips ? "active" : "uses device fallback")<<'\n';
     std::size_t topRed=0, bottomBlue=0, jpegBlue=0, jpegWhite=0;
     for (size_t i=0;i<textured.tokens.size();++i) {
         if (textured.tokens[i]!=mesh.token) continue;

@@ -1,4 +1,5 @@
 #include "StudioWindow.hpp"
+#include "StudioBuild.h"
 #include "Appearance.hpp"
 #include "RasterCanvas.hpp"
 #include "Viewport.hpp"
@@ -161,6 +162,9 @@ void exerciseOrganization(const QString& path,const QString& settingsDir,const Q
         expose(window);
         if (!evidenceDir.isEmpty()) window.resize(1520,970);
         check(window.openProject(path),"Could not open folder test project");
+        check(control<QLabel>(window,"studioBuildVersion")->text().endsWith(QStringLiteral(PLATZ_VERSION)) &&
+              control<QLabel>(window,"authoringMode")->text().contains("Project rev."),
+              "Studio version and project revision were not presented separately");
         for (const auto& entry : folders) {
             openFolderPane(window,entry);
             auto* tree=control<QTreeWidget>(window,entry.tree);

@@ -68,7 +68,7 @@ struct Device {
     void open(HWND hwnd);
     Buffer buffer(VkDeviceSize bytes, VkBufferUsageFlags usage, MemoryIntent intent, const char* label);
     Image image(VkExtent2D extent, VkFormat format, VkImageUsageFlags usage, VkImageAspectFlags aspect,
-                const char* label);
+                const char* label, uint32_t mipLevels=1);
     void label(VkObjectType type, uint64_t handle, const char* text) const;
     VkDeviceSize viewportBudget() const;
     std::string report() const;

@@ -84,11 +84,19 @@ BaseColorTexture readTexture(const cgltf_texture_view& view, std::span<const std
     const auto size = inspectTexture(source.subspan(texture.offset, texture.length), texture.encoding);
     texture.width = size[0];
     texture.height = size[1];
+    texture.mip = TextureMipFilter::Linear;
     if (const auto* sampler = view.texture->sampler) {
         texture.wrapU = addressMode(sampler->wrap_s);
         texture.wrapV = addressMode(sampler->wrap_t);
         texture.min = filterMode(sampler->min_filter);
         texture.mag = filterMode(sampler->mag_filter);
+        switch (sampler->min_filter) {
+        case cgltf_filter_type_nearest:
+        case cgltf_filter_type_linear: texture.mip=TextureMipFilter::None; break;
+        case cgltf_filter_type_nearest_mipmap_nearest:
+        case cgltf_filter_type_linear_mipmap_nearest: texture.mip=TextureMipFilter::Nearest; break;
+        default: break;
+        }
     }
     return texture;
 }

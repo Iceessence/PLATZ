@@ -340,7 +340,7 @@ Buffer Device::buffer(VkDeviceSize bytes, VkBufferUsageFlags usage, MemoryIntent
     return b;
 }
 Image Device::image(VkExtent2D extent, VkFormat format, VkImageUsageFlags usage, VkImageAspectFlags aspect,
-                    const char* name) {
+                    const char* name, uint32_t mipLevels) {
     Image img;
     img.device = device;
     img.allocator = allocator;
@@ -349,7 +349,7 @@ Image Device::image(VkExtent2D extent, VkFormat format, VkImageUsageFlags usage,
     ci.imageType = VK_IMAGE_TYPE_2D;
     ci.extent = {extent.width, extent.height, 1};
     ci.format = format;
-    ci.mipLevels = 1;
+    ci.mipLevels = mipLevels;
     ci.arrayLayers = 1;
     ci.samples = VK_SAMPLE_COUNT_1_BIT;
     ci.tiling = VK_IMAGE_TILING_OPTIMAL;
@@ -362,7 +362,7 @@ Image Device::image(VkExtent2D extent, VkFormat format, VkImageUsageFlags usage,
     vi.image = img.handle;
     vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
     vi.format = format;
-    vi.subresourceRange = {aspect, 0, 1, 0, 1};
+    vi.subresourceRange = {aspect, 0, mipLevels, 0, 1};
     check(vkCreateImageView(device, &vi, nullptr, &img.view), "Creating image view");
     label(VK_OBJECT_TYPE_IMAGE, reinterpret_cast<uint64_t>(img.handle), name);
     return img;

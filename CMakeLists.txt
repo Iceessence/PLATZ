@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.28)
-project(PLATZ VERSION 0.1.0 LANGUAGES CXX)
+project(PLATZ VERSION 0.2.0 LANGUAGES CXX)
+configure_file(src/studio/StudioBuild.h.in generated/StudioBuild.h @ONLY)
 if(NOT WIN32 OR NOT MSVC)
     message(FATAL_ERROR "The qualified development target is Windows x64 with MSVC.")
 endif()
@@ -20,7 +21,7 @@ add_library(platz_studio STATIC src/studio/StudioWindow.cpp src/studio/StudioPan
     src/studio/StudioNativeMesh.cpp src/studio/StudioImages.cpp src/studio/StudioImageEditor.cpp
     src/studio/RasterCanvas.cpp src/studio/Viewport.cpp src/studio/StudioTransform.cpp src/studio/StudioWorkspaces.cpp
     src/studio/TransformGizmo.cpp src/studio/StudioPreferences.cpp src/studio/Appearance.cpp)
-target_include_directories(platz_studio PUBLIC src/studio)
+target_include_directories(platz_studio PUBLIC src/studio ${CMAKE_CURRENT_BINARY_DIR}/generated)
 target_link_libraries(platz_studio PUBLIC Qt6::Widgets platz_core platz_engine)
 set(platz_brand_dir "${CMAKE_CURRENT_SOURCE_DIR}/src/studio/brand")
 set(platz_brand_images "")

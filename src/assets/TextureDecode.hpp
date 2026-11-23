@@ -9,6 +9,7 @@ namespace platz {
 enum class TextureEncoding { Png, Jpeg };
 enum class TextureWrap { Repeat, Clamp, Mirror };
 enum class TextureFilter { Linear, Nearest };
+enum class TextureMipFilter { None, Nearest, Linear };
 struct BaseColorTexture {
     static constexpr std::uint32_t maxSide = 1024;
     static constexpr std::uint32_t maxActive = 64;
@@ -18,6 +19,7 @@ struct BaseColorTexture {
     TextureEncoding encoding{};
     TextureWrap wrapU{}, wrapV{};
     TextureFilter min{}, mag{};
+    TextureMipFilter mip{};
     auto operator<=>(const BaseColorTexture&) const = default;
     std::size_t rgbaSize() const { return std::size_t(width) * height * 4; }
 };

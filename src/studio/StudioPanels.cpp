@@ -1,5 +1,6 @@
 #include "StudioWindow.hpp"
 #include "Appearance.hpp"
+#include "StudioBuild.h"
 #include "Viewport.hpp"
 #include "OrganizerTree.hpp"
 #include <QColorDialog>
@@ -138,6 +139,9 @@ void StudioWindow::buildHub() {
     brand->setObjectName("brand");
     mark->addWidget(brand);
     mark->addStretch();
+    auto* version=label(tr("Studio %1").arg(QStringLiteral(PLATZ_VERSION)),"minor");
+    version->setObjectName("hubBuildVersion");
+    mark->addWidget(version);
     body->addLayout(mark);
     body->addSpacing(17);
     auto* title = label(tr("Projects"));
@@ -269,6 +273,7 @@ void StudioWindow::buildStudio() {
     tree_->setObjectName("sceneTree");
     tree_->setAccessibleName(tr("Scene objects"));
     tree_->setIconSize(QSize(19,19));
+    tree_->setHeaderHidden(true);
     left->addWidget(tree_,1);
     add_ = button(tr("+   Add object"),"addObject");
     auto* choices = new QMenu(add_);
@@ -311,6 +316,10 @@ void StudioWindow::buildStudio() {
     backend_=label(tr("Awaiting viewport"),"minor");
     backend_->setObjectName("activeBackend");
     statusBar()->addPermanentWidget(backend_);
+    auto* build=label(tr("Studio %1").arg(QStringLiteral(PLATZ_VERSION)),"minor");
+    build->setObjectName("studioBuildVersion");
+    build->setToolTip(tr("The installed PLATZ Studio version. The project revision is shown above the viewport."));
+    statusBar()->addPermanentWidget(build);
     notice_=label({});
     notice_->setObjectName("notice");
     notice_->setTextInteractionFlags(Qt::TextSelectableByMouse);
@@ -320,7 +329,7 @@ void StudioWindow::buildStudio() {
 void StudioWindow::buildInspector() {
     inspectorDock_ = new QDockWidget(tr("Inspector"),this);
     inspectorDock_->setObjectName("inspectorDock");
-    inspectorDock_->setMinimumWidth(250);
+    inspectorDock_->setMinimumWidth(292);
     auto* scroll = new QScrollArea;
     scroll->setObjectName("inspectorScroll");
     scroll->setWidgetResizable(true);

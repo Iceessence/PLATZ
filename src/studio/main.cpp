@@ -1,4 +1,5 @@
 #include "Appearance.hpp"
+#include "StudioBuild.h"
 #include "StudioWindow.hpp"
 #include <QApplication>
 #include <QSettings>
@@ -7,6 +8,7 @@ int main(int argc,char** argv) {
     QApplication app(argc,argv);
     app.setOrganizationName("PLATZ");
     app.setApplicationName("PLATZ Studio");
+    app.setApplicationVersion(PLATZ_VERSION);
     const auto profile=qEnvironmentVariable("PLATZ_SETTINGS_DIR");
     if (!profile.isEmpty()) {
         QSettings::setDefaultFormat(QSettings::IniFormat);
