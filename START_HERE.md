@@ -3,7 +3,7 @@
 The permanent source root is C:\PLATZ. Start with CURRENT_HANDOFF.md for the tested revision and feature ledger. Product authority is docs/authority/PLATZ_MASTER_ENGINE_FIRST_V4.md. The V4 developer directive and Vulkan steering are alongside it. ADR-001 is the active renderer decision, retaining the Core and Studio decisions in ADR-000.
 
 ## Launch on the development workstation
-Double-click `C:\PLATZ\out\Release\PLATZ.exe` or run it in PowerShell to open the project hub.
+Double-click `C:\PLATZ\out\Release\PLATZ.exe` or run it in PowerShell to open the project hub. The hub, status bar, **Help → About PLATZ Studio**, and Windows executable properties identify the installed Studio version. The viewport displays the open project's revision separately. Update the top-level CMake project version when publishing a new Studio development build.
 
     & 'C:\PLATZ\out\Release\PLATZ.exe'
 
@@ -63,9 +63,9 @@ The **Assets** dock lists embedded GLB meshes and their instance counts. Use **I
 
 Use **Add object → Import mesh from GLB…** to import and place in one step. The importer accepts one static mesh with up to 32 indexed triangle primitives and an embedded buffer, up to 2 MiB per file. Imported GLB bytes and derived native GLB sizes share the 8 MiB mesh-library budget. Saving embeds the exact imported source bytes and keeps the .platz project portable. Project images have a separate budget of 32 sources and 8 MiB of RGBA pixels.
 
-Select **Color study** in the validation project. Under **Material** in the Inspector, choose **Copper** or **Lagoon** and edit the sRGB hex value or use the swatch to pick a color. Parts that share a GLB material share a slot. A slot edit applies to the selected object. **Reset** restores the imported color, and Undo restores the previous edit. The importer reads RGB base-color factors. The preview renders opaque colors.
+Select **Color study** in the validation project. Under **Material overrides** in the Inspector, choose **Copper** or **Lagoon** and edit the sRGB hex value or use the swatch to pick a color. Parts that share a GLB material share a slot. A slot edit applies to the selected object. **Reset** restores the imported color, and Undo restores the previous edit. The importer reads RGB base-color factors. The preview renders opaque colors.
 
-Select **Harbor signs** to try textures. Under **Material**, choose **Signal flags** (PNG) or **Harbor mark** (JPEG). **Use imported texture** switches the selected slot between its embedded image and flat base color. While the texture is enabled, the base color tints it. The checkbox setting is saved per object and supports Undo and Redo. The current slice uses embedded PNG/JPEG images up to 1024 × 1024, UV0, and single-level sampling. Older asset projects keep their flat appearance until you enable a supported imported texture.
+Select **Harbor signs** to try textures. Under **Material overrides**, choose **Signal flags** (PNG) or **Harbor mark** (JPEG). **Use imported texture** switches the selected slot between its embedded image and flat base color. While the texture is enabled, the base color tints it. The checkbox setting is saved per object and supports Undo and Redo. The current slice uses embedded PNG/JPEG images up to 1024 × 1024, and UV0. Imported textures can use GPU-generated mipmaps when the sampler calls for them. Older asset projects keep their flat appearance until you enable a supported imported texture.
 
 ## Build and verify
 On Windows x64 with VS 2026 Desktop development with C++, Windows SDK 10.0.26100, VS CMake tools, Python 3.9+ with the py launcher, Windows tar and curl:
