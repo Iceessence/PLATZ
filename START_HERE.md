@@ -1,17 +1,17 @@
 # PLATZ development entry point
 
-The permanent source root is C:\PLATZ. Start with CURRENT_HANDOFF.md for the tested revision and feature ledger. Product authority is docs/authority/PLATZ_MASTER_ENGINE_FIRST_V4.md. The V4 developer directive and Vulkan steering are alongside it. ADR-001 is the active renderer decision, retaining the Core and Studio decisions in ADR-000.
+The permanent source root is `C:\PLATZ`. [CURRENT_HANDOFF.md](CURRENT_HANDOFF.md) records the active build and test evidence. [OWNER_STATUS.md](OWNER_STATUS.md) describes the current product, and [DECISIONS_AND_FEATURE_LEDGER.md](DECISIONS_AND_FEATURE_LEDGER.md) links features to the [Master](docs/authority/PLATZ_MASTER_ENGINE_FIRST_V4.md) and active ADRs. [AGENTS.md](AGENTS.md) gives the continuation instructions.
 
 ## Launch on the development workstation
 Double-click `C:\PLATZ\out\Release\PLATZ.exe` or run it in PowerShell to open the project hub. The hub, status bar, **Help → About PLATZ Studio**, and Windows executable properties identify the installed Studio version. The viewport displays the open project's revision separately. Update the top-level CMake project version when publishing a new Studio development build.
 
     & 'C:\PLATZ\out\Release\PLATZ.exe'
 
-For an editable copy of the permanent validation scene, run the following.
+Use **Open validation workspace** from the hub or Project menu to continue the same project. PLATZ seeds `.local/validation/PLATZ Validation.platz` from the tracked reference on first use. Later versions reopen that same editable working file. You can also launch directly into it by passing the reference path.
 
-    $platzReview = Join-Path $env:TEMP "PLATZ Review $([guid]::NewGuid()).platz"
-    Copy-Item -LiteralPath 'C:\PLATZ\projects\PLATZ Validation.platz' -Destination $platzReview
-    & 'C:\PLATZ\out\Release\PLATZ.exe' $platzReview
+    & 'C:\PLATZ\out\Release\PLATZ.exe' 'C:\PLATZ\projects\PLATZ Validation.platz'
+
+The working file preserves edits across launches and builds. The tracked project supplies known inputs for reproducible tests, which make isolated copies when they need to save or test recovery.
 
 Use **New project** in the hub to create an editable `.platz` file. Select an object in the viewport or Scene panel. Use **Select**, **Move**, **Rotate**, or **Scale** above the viewport, or press **1–4** while the viewport has focus. Drag a colored axis or plane handle. The center moves in the screen plane or scales uniformly, depending on the tool. The outer rotation ring turns around the view axis. Release to apply one Undo step. Right-click or press **Escape** during a drag to restore the previous transform.
 
@@ -23,7 +23,7 @@ Add object creates primitives. Edit > Repeat objects previews copies with world-
 
 ## Personalize Studio
 
-Use the toolbar workspace picker or **Workspace → Switch workspace**. **Modeling** shows Scene, Inspector and the mesh library. **Materials** opens a wider Inspector near the material controls. **Texture** brings the image library forward. **Playtest** gives the viewport more space and keeps Play/Stop in the toolbar. Drag dock titles to rearrange or float panels, resize dividers, and use the View menu to show panels again.
+Use the toolbar workspace picker or **Workspace → Switch workspace**. **Modeling** shows Scene, Inspector and the mesh library. **Materials** opens a wider Inspector near the material controls. **Texture** shows image commands and brings the image library forward. **Playtest** gives the viewport more space and hides the authoring manipulator while keeping Play/Stop available. Drag dock titles to rearrange or float panels, resize dividers, and use the View menu to show panels again.
 
 Choose **Workspace → Save workspace as** to create a named copy. **Reset workspace** restores the active preset's default or the original arrangement of a saved copy. Studio remembers dock placement, sizes, floating positions, visibility and the Assets tab for each workspace. Earlier single-layout preferences appear as **Custom**.
 
@@ -49,7 +49,7 @@ Save the project to retain the editable recipe and references in schema v7. **Ex
 
 ## Paint and assign a texture
 
-Select a native mesh or an imported mesh material slot with UV0. Open **Create → Image / Texture** to paint a project image. The canvas has a pencil, eraser, connected fill, eyedropper, RGBA color picker, zoom and grid. Change the width and height to crop or extend the canvas at its top-left origin. The hex field uses `#RRGGBBAA`. Canvas Undo/Redo works on strokes, fills and dimension changes. Enable **Assign to selected material slot** to see the draft on your mesh. **Create image** or **Apply to image** commits the draft as one project edit. Cancel restores the previous scene.
+Select a native mesh or an imported mesh material slot with UV0. Open **Create → Image / Texture** or **Texture → New image** to paint a project image. The canvas opens beside the live Vulkan viewport in Studio. Drag the divider to adjust the split. The canvas has a pencil, eraser, connected fill, eyedropper, RGBA color picker, zoom and grid. With the canvas focused, move the pixel cursor with the arrow keys and use the selected tool with Space. Change the width and height to crop or extend the canvas at its top-left origin. The hex field uses `#RRGGBBAA`. Canvas Undo/Redo works on strokes, fills and dimension changes. Enable **Assign to selected material slot** to see the draft on your mesh. **Create image** or **Apply to image** commits the draft as one project edit. **Discard draft** or Escape restores the authored scene. Apply or discard the draft before saving the project or entering Play.
 
 The **Images** tab in Assets lists editable sources and usage counts. **New image** opens the project image editor directly. Double-click a source to edit it across its linked material slots. Use **Default texture** in the Inspector to detach a project image and restore the slot’s prior embedded-texture or flat-color setting. Use **Locate image source** to select the source in Assets. Manage offers assignment, rename, duplication, **Make selected slot unique**, and removal of unused images.
 
